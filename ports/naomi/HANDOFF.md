@@ -98,6 +98,22 @@ Arreglos de la fase 2 que conviene recordar:
 - **`memcmp` de newlib es byte a byte** en SH-4: `same()` compara por palabras (de 9 a 4 ms la escena).
 - Quads ordenados por textura y enviados con *direct rendering*: el envío de ~500 quads, de 3,5 a 1,2 ms.
 
+## Prueba en placa sobre naomi-kit (2026-11-13, 21:35)
+
+Imagen `or_213421.bin.gz` (md5 `53940196ce7cdb338ca2e5d04ee0c33c`, rama `naomi` con el kit, bloque live en
+`0x8c0ca868`), enviada desde el PC del usuario a la Pi (`/boot/roms/h-outrunners_naomi.bin.gz`; la anterior guardada en
+`/root/h-outrunners_naomi.prev.bin.gz`) y con `dc2naomi_send.py 10.0.0.4`. Lector: `live.py` de naomi-pi-tools en
+`/sbin/piforce/naomi-kit/` (con `nk_live.py` y `drive.py` del kit).
+
+- **Arranca y juega sobre el kit**: `live.py ADDR words` lee el bloque `NKLV` con los nombres de los campos; consola
+  por `log`; 4 MB de muestras al AICA en 1952 ms; `sound_writes` crece (el AICA recibe registros).
+- **Mandos por `nk_cabinet_read`**: volante, gas, freno y botones se mueven en `inputs` mientras el usuario juega.
+- **fps**: 57-60 casi siempre; segundos sueltos a 28-49 (peor fotograma 70-130 ms) cuando `build_us` sube a 10-22 ms.
+- **Memoria de vídeo**: baja de 6 MB a ~0.2-0.4 MB en minuto y medio y se queda ahí, con `missing 0` (la caché
+  recicla). El campo `textures` da valores enormes (41 millones): revisar qué cuenta.
+- `misaligned` 101 (resueltos por el kit, sin cuelgue).
+- Falta lo que solo ve quien está delante: sonido, sombras, fundidos, START = moneda.
+
 ## Fase 2 — render PowerVR2
 
 Código: `runtime/src/video_scene.c` (escena de quads, portable, incluida por `video.c` con `ORUNNERS_VIDEO_SCENE`),
