@@ -210,6 +210,15 @@ if(ORUNNERS_DECOMPILED AND ORUNNERS_SOUND_DECOMPILED)
 		target_link_libraries(orunners_anbernic_maker PRIVATE orunners_game_console orunners_sound orunners_extract)
 		set_target_properties(orunners_anbernic_maker PROPERTIES OUTPUT_NAME "OutRunners Anbernic")
 
+		# The NAOMI's netboot image, made on the player's computer (ports/naomi/maker): the game's NAOMI program
+		# (orunners_naomi-prog.bin, naomibintool's: ports/naomi/build_naomi.sh) with the assets of the player's
+		# ROM set in the NetDIMM's archive, as build_naomi.sh makes it. A command line
+		add_executable(orunners_naomi_maker ports/naomi/maker/main.c ports/naomi/maker/make_naomi.c
+			ports/switch/nsp/rom_pack.c)
+		target_include_directories(orunners_naomi_maker PRIVATE ports/switch/nsp)
+		target_link_libraries(orunners_naomi_maker PRIVATE orunners_game orunners_sound orunners_extract)
+		set_target_properties(orunners_naomi_maker PROPERTIES OUTPUT_NAME "OutRunners NAOMI")
+
 		# Android's APK, made on the player's computer (ports/android/apk): the game's Android build
 		# (android/outrunners-base.apk) with the assets pack of the player's ROM set (rom_pack.c), signed with
 		# the player's own key; its SHA-256 is OutRunners NSP's (crypto.c). A command line; with SDL2 also a

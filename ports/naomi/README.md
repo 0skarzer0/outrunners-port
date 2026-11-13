@@ -18,7 +18,14 @@ Work in progress for a Crazy Taxi upright with a NAOMI 2 and a 512 MB NetDIMM lo
    (`/dimm/orunners.pcm`) in the AICA's RAM, its 28 voices on AICA channels whose registers the SH-4 works out from
    the MultiPCM's; the left seat's sound on both speakers. The YM3438 only gives the sound program its timers:
    OutRunners plays no FM note. Checked on a computer (`ORUNNERS_AICA_WAV`, below); **not yet heard on the board**.
-4. **A converter for Windows**: drop `orunners.zip`, get the `.bin.gz`.
+4. **A converter for Windows**, *OutRunners NAOMI* (`maker/`): `orunners.zip` dropped on it (or beside it) and the
+   game's NAOMI program beside it (`orunners_naomi-prog.bin`, naomibintool's, which holds nothing of the ROM set),
+   out comes `orunners_naomi.bin.gz`, as `build_naomi.sh` makes it (the assets of `rom_pack.c`, the makers'; the
+   archive as `naomi_pack.py` writes it; gzip in stored blocks). Built for Windows with MinGW:
+   `cmake -B build-win -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc
+   -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ -DCMAKE_BUILD_TYPE=Release && make -C build-win orunners_naomi_maker`.
+   Checked (2026-11-13): its image holds the same program and samples as `build_naomi.sh`'s, and the same pack
+   but for the sprites' blocks (the makers' pack leaves out the runs of 0xFFFFFFFF, which read the same).
 
 ## Build
 
