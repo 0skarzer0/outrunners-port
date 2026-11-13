@@ -215,7 +215,11 @@ static void clip_area(area *target, const area *bounds)
 /* The pen (0-15) of a pixel of a 16x16 tile */
 static int tile_pen(uint32_t tile, int x, int y)
 {
+#ifdef ORUNNERS_PACKED_PENS
+	return (video.graphics.tile_pens[tile % video.graphics.tile_count][(y * 16 + x) >> 1] >> ((x & 1) << 2)) & 15;
+#else
 	return video.graphics.tile_pens[tile % video.graphics.tile_count][y * 16 + x];
+#endif
 }
 
 /* A pixel of a tilemap page (32 x 16 cells, 512 x 256 pixels). A cell is the tile number (13 bits, the

@@ -20,7 +20,9 @@
 #include <string.h>
 
 /* the C of a task nests as deep as the game's calls do, with the locals of the generated code */
+#ifndef TASK_STACK_SIZE
 #define TASK_STACK_SIZE (16u << 20)
+#endif
 
 #ifdef _WIN32
 
@@ -165,6 +167,108 @@ host_task *host_task_create(void (*start)(void))
 	registers = (uint64_t *)(((uintptr_t)task->stack + TASK_STACK_SIZE - SAVED_BYTES) & ~(uintptr_t)15);
 	memset(registers, 0, SAVED_BYTES);
 	registers[11] = (uint64_t)(uintptr_t)run_task;    /* (x30: where the first ret goes) */
+	task->stack_pointer = registers;
+	return task;
+}
+
+void host_task_switch(host_task *to)
+{
+	host_task *from = current;
+
+	if (to == from)
+		return;
+	current = to;
+	host_switch_stacks(&from->stack_pointer, to->stack_pointer);
+}
+
+#elif defined(__SH4__) || defined(__sh__)
+/* The NAOMI's SH-4 (KallistiOS): no ucontext either, so as on aarch64 a task's registers are kept on its own
+   stack. What a call keeps for its caller in GCC's SH ABI: r8-r14, the return address pr and fr12-fr15; mach
+   and macl are kept too. r15 is the stack pointer. Measured on Linux (2026-11-13): two tasks, about 3.5 KB of
+   stack each, so the NAOMI build sets TASK_STACK_SIZE far below the 16 MB of the computers' builds */
+#define SAVED_WORDS 14    /* fr12-fr15, macl, mach, r8-r14, pr: from the top of the stack down */
+
+void host_switch_stacks(void **from_stack, void *to_stack) __asm__("host_switch_stacks_sh4");
+
+__asm__(
+	".text\n"
+	".global host_switch_stacks_sh4\n"
+	".align 2\n"
+	"host_switch_stacks_sh4:\n"
+	"	sts.l pr, @-r15\n"
+	"	mov.l r14, @-r15\n"
+	"	mov.l r13, @-r15\n"
+	"	mov.l r12, @-r15\n"
+	"	mov.l r11, @-r15\n"
+	"	mov.l r10, @-r15\n"
+	"	mov.l r9, @-r15\n"
+	"	mov.l r8, @-r15\n"
+	"	sts.l mach, @-r15\n"
+	"	sts.l macl, @-r15\n"
+	"	fmov.s fr15, @-r15\n"
+	"	fmov.s fr14, @-r15\n"
+	"	fmov.s fr13, @-r15\n"
+	"	fmov.s fr12, @-r15\n"
+	"	mov.l r15, @r4\n"
+	"	mov r5, r15\n"
+	"	fmov.s @r15+, fr12\n"
+	"	fmov.s @r15+, fr13\n"
+	"	fmov.s @r15+, fr14\n"
+	"	fmov.s @r15+, fr15\n"
+	"	lds.l @r15+, macl\n"
+	"	lds.l @r15+, mach\n"
+	"	mov.l @r15+, r8\n"
+	"	mov.l @r15+, r9\n"
+	"	mov.l @r15+, r10\n"
+	"	mov.l @r15+, r11\n"
+	"	mov.l @r15+, r12\n"
+	"	mov.l @r15+, r13\n"
+	"	mov.l @r15+, r14\n"
+	"	lds.l @r15+, pr\n"
+	"	rts\n"
+	"	nop\n");
+
+struct host_task
+{
+	void *stack_pointer;    /* where it stopped: its registers on top */
+	void *stack;
+	void (*start)(void);
+};
+
+static host_task main_task;
+static host_task *current;
+
+host_task *host_task_main(void)
+{
+	if (!current)
+		current = &main_task;
+	return &main_task;
+}
+
+static void run_task(void)
+{
+	current->start();
+	fprintf(stderr, "A task came to its end\n");
+	exit(3);
+}
+
+host_task *host_task_create(void (*start)(void))
+{
+	host_task *task = calloc(1, sizeof(*task));
+	uint32_t *registers;
+
+	if (task)
+		task->stack = malloc(TASK_STACK_SIZE);
+	if (!task || !task->stack)
+	{
+		fprintf(stderr, "A task could not be created\n");
+		exit(3);
+	}
+	task->start = start;
+	/* its first switch pops registers that return into run_task, at the top of its stack (8-byte aligned) */
+	registers = (uint32_t *)(((uintptr_t)task->stack + TASK_STACK_SIZE - SAVED_WORDS * 4) & ~(uintptr_t)7);
+	memset(registers, 0, SAVED_WORDS * 4);
+	registers[SAVED_WORDS - 1] = (uint32_t)(uintptr_t)run_task;    /* (pr: where the first rts goes) */
 	task->stack_pointer = registers;
 	return task;
 }

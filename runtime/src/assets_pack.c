@@ -23,7 +23,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef ORUNNERS_PACKED_PENS
+#define PACK_MAGIC      "ORAN"    /* (the NAOMI's: ports/naomi/naomi_assets.py) */
+#else
 #define PACK_MAGIC      "ORAP"
+#endif
 #define PACK_VERSION    1u
 
 /* ---- the parts' bytes ---- */

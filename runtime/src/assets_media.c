@@ -37,6 +37,11 @@
 #include <string.h>
 
 #define TILE_COUNT     0x8000u
+#ifdef ORUNNERS_PACKED_PENS
+#define TILE_PEN_BYTES 128u    /* (two pens a byte, the even pixel's in the low nibble: the NAOMI's pack) */
+#else
+#define TILE_PEN_BYTES 256u
+#endif
 #define TILESET_ROW    32u           /* tiles a row of a tileset's PNG */
 #define PCM_SIZE       0x400000u
 #define PCM_HEADERS    0x200u
@@ -772,7 +777,7 @@ int assets_pack_read_media(pack_reader *reader)
 	for (uint32_t tile = 0; tile < TILE_COUNT; tile++)
 		if ((present[tile / 8] >> (tile % 8)) & 1u)
 		{
-			if (!(tile_pens[tile] = pack_get_bytes(reader, 256)))
+			if (!(tile_pens[tile] = pack_get_bytes(reader, TILE_PEN_BYTES)))
 				return 0;
 		}
 		else
