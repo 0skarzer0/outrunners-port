@@ -8,7 +8,9 @@
  *    What it covers is what OutRunners uses of the chips (docs/outrunners.md of 0skarzer0/naomi-wheel-games): the
  *    text layer, NBG0 (scroll and zoom), NBG2 (scroll, row scroll, row select), the backdrop, the sprites (zoom,
  *    flips, 8 bits, indirect colours, the list's clip rectangle) and the mixer's priorities and colour offsets.
- *    Not covered (yet): NBG1, NBG3, the bitmap, clip windows, blending, shadows, the list's outside clip, the
+ *    Blending: the text layer's over the sprites, by 8 x 8 cells over the sprites' rectangles. Shadows: the
+ *    sprites' shadow pen (an image of its own, drawn black at half over what is under it).
+ *    Not covered (yet): NBG1, NBG3, clip windows, other layers' blending, shadow sprites, the list's outside clip, the
  *    screens' flips, WIDE. Left screen only.
  *
  *    The scene keeps images of 16-bit pixels (ARGB1555: bit 15 opaque, red in 14-10) that a backend holds
@@ -42,7 +44,8 @@ typedef struct
    texels at its corners (u0, v0 at x0, y0; u1, v1 at x1, y1: a flip has them the other way), its depth, and the
    colour it takes: each channel times modulate's (0-255 each, 0x00RRGGBB: 255 keeps it), plus add's (0-255 each,
    0x00RRGGBB). Image 0 is no image: a plain 'colour' (ARGB1555, opaque). Texels whose bit 15 is clear are not
-   drawn */
+   drawn. 'weight' below 8 blends: the quad's colour times weight / 8 plus what is under it times (8 - weight) / 8
+   (the mixer's blending: the text layer over the sprites) */
 typedef struct
 {
 	float x0, y0, x1, y1;
@@ -52,12 +55,16 @@ typedef struct
 	uint16_t colour;
 	uint32_t modulate;
 	uint32_t add;
+	uint8_t weight;
 } s32_scene_quad;
 
 typedef struct
 {
 	const s32_scene_quad *quads;
 	int count;
+	/* taken from every channel of the whole picture at the end, 0-255 each (0x00RRGGBB), floored at zero: the
+	   mixer's negative colour offsets when all the layers take the same (fades) */
+	uint32_t subtract;
 	/* what the frame needed that the scene does not cover, as bits (S32_SCENE_MISSING_), for the log */
 	uint32_t missing;
 	/* the work done: images (re)drawn, their texels */

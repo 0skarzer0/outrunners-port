@@ -74,6 +74,7 @@ typedef struct scene_slot
 	uint32_t version;                /* of the colours it was drawn with */
 	int image;
 	int width, height;               /* the image's (powers of two) */
+	int shadow_image;                /* its shadow pen's texels (opaque black), 0 if it has none */
 	uint32_t used;
 } scene_slot;
 
@@ -111,6 +112,7 @@ static struct
 	uint8_t character_changed[512];
 	int character_bank;
 	uint16_t pixels[512 * 256];      /* an image as it is made */
+	uint16_t shadow_pixels[512 * 256];    /* ... a sprite's shadow image */
 	uint32_t missing;
 	struct
 	{
@@ -127,6 +129,12 @@ static struct
 	} bitmap;
 	scene_layer layers[LAYERS];
 	scene_layer groups[16];
+	/* the text layer's blending (mixer 0x4E, 0x30): over which sprite groups, its weight in eighths */
+	bool text_blends;
+	uint16_t text_sprite_groups;
+	uint8_t text_weight;
+	scene_page *text_entry;
+	int text_quad;    /* its quad, -1 none */
 	int group_shift, group_mask, sprite_bits;
 } scene;
 
@@ -174,9 +182,10 @@ static void palette_update(void)
 /* ---- the mix: depths and colours of the layers and the sprite groups (video.c's mix) ---- */
 
 /* A layer's colour offsets (0x40-0x44 or 0x46-0x4A, red green blue, -32 to 31 a channel) as a quad's colour:
-   a negative offset scales the channel down ((31 + offset) / 31: the same at the ends, darker in between
-   than adding it), a positive one adds */
-static void colour_of(scene_layer *layer, int offsets)
+   a positive offset adds; a negative one, when every layer takes the same offsets (a fade), is the frame's
+   'subtract' (exact: the backend takes it from the whole picture), otherwise it scales the channel down
+   ((31 + offset) / 31: the same at the ends, darker in between than taking it away) */
+static void colour_of(scene_layer *layer, int offsets, bool uniform)
 {
 	layer->modulate = 0xffffff;
 	layer->add = 0;
@@ -187,7 +196,9 @@ static void colour_of(scene_layer *layer, int offsets)
 		const int offset = sign_extend(mixer_register(0, (offsets ? 0x46u : 0x40u) + 2 * (uint32_t)channel), 6);
 		const int shift = 16 - 8 * channel;    /* red, green, blue: 0x00RRGGBB */
 
-		if (offset < 0)
+		if (offset < 0 && uniform)
+			scene.out.subtract |= (uint32_t)(offset <= -31 ? 255 : 255 * -offset / 31) << shift;
+		else if (offset < 0)
 			layer->modulate = (layer->modulate & ~(0xffu << shift)) | (uint32_t)(offset <= -31 ? 0 : 255 * (31 + offset) / 31) << shift;
 		else if (offset > 0)
 			layer->add |= (uint32_t)(offset >= 31 ? 255 : 255 * offset / 31) << shift;
@@ -199,46 +210,79 @@ static void mix_update(int drawn)
 	const uint16_t sprite_control = mixer_register(0, 0x4c);
 	const sprite_grouping grouping = groupings[sprite_control & 0x0f];
 
+	scene.text_blends = false;
 	if (bit(mixer_register(0, 0x4e), 11))
 		for (int index = LAYER_TEXT; index <= LAYER_BITMAP; index++)
-			if (((mixer_register(0, 0x30 + 2 * (uint32_t)index) >> 6) & 0xff) != 0 && bit((uint32_t)drawn, index))
+		{
+			const uint16_t blend = mixer_register(0, 0x30 + 2 * (uint32_t)index);
+			const int with = (blend >> 6) & 0xff;
+
+			if (with == 0 || !bit((uint32_t)drawn, index))
+				continue;
+			/* the text over the sprites, all OutRunners does (docs/outrunners.md); anything else is not drawn */
+			if (index == LAYER_TEXT && with == 1 << LAYER_SPRITES)
+			{
+				scene.text_blends = true;
+				scene.text_sprite_groups = sprite_blend(blend & 0x3f);
+				scene.text_weight = (uint8_t)(7 - ((mixer_register(0, 0x4e) >> 8) & 7));
+			}
+			else
 				scene.missing |= S32_SCENE_MISSING_BLEND;
-	if (bit(sprite_control, 2))
-		scene.missing |= S32_SCENE_MISSING_SHADOW;
-	for (int index = LAYER_TEXT; index <= LAYER_BITMAP; index++)
+		}
+	/* (0x4C bit 2 darkens the sprite pixels whose bit 15 is clear: only the shadow sprites' (left out) and
+	   indirect colours without 0x8000, which OutRunners does not use) */
 	{
-		const uint16_t control = mixer_register(0, 0x20 + 2 * (uint32_t)index);
-		scene_layer *layer = &scene.layers[index];
+		/* the offsets each layer takes (0, 1, 2 none): the same for all, a fade, is taken away exactly */
+		int offsets[LAYERS + 1];    /* (the sprites' last) */
+		bool uniform = true;
 
-		layer->shown = bit((uint32_t)drawn, index) && (control & 0x0f) != 0;
-		layer->z = (float)((control & 0x0f) << 3 | (6 - index));
-		layer->palette_base = (uint16_t)((control & 0x00f0) << 6);
-		layer->shift = (control >> 8) & 3;
-		colour_of(layer, color_offsets(0, bit(mixer_register(0, 0x3e), index),
-			bit(mixer_register(0, 0x30 + 2 * (uint32_t)index), 14)));
-	}
-	{
-		scene_layer *backdrop = &scene.layers[LAYER_BACKDROP];
+		for (int index = LAYER_TEXT; index <= LAYER_BITMAP; index++)
+		{
+			const uint16_t control = mixer_register(0, 0x20 + 2 * (uint32_t)index);
+			scene_layer *layer = &scene.layers[index];
 
-		backdrop->shown = true;
-		backdrop->z = 1 << 3;
-		backdrop->palette_base = (uint16_t)((mixer_register(0, 0x2c) & 0x00f0) << 6);
-		backdrop->shift = (mixer_register(0, 0x2c) >> 8) & 3;
-		colour_of(backdrop, color_offsets(0, bit(mixer_register(0, 0x3e), 8), bit(mixer_register(0, 0x3e), 14)));
-	}
-	scene.group_shift = grouping.shift;
-	scene.group_mask = grouping.mask;
-	scene.sprite_bits = ((1 << grouping.shift) - 1) & 0x3fff;
-	for (int group = 0; group <= grouping.mask; group++)
-	{
-		const uint16_t control = mixer_register(0, 2 * (uint32_t)(grouping.base | group));
-		scene_layer *sprites = &scene.groups[group];
+			layer->shown = bit((uint32_t)drawn, index) && (control & 0x0f) != 0;
+			layer->z = (float)((control & 0x0f) << 3 | (6 - index));
+			layer->palette_base = (uint16_t)((control & 0x00f0) << 6);
+			layer->shift = (control >> 8) & 3;
+			offsets[index] = color_offsets(0, bit(mixer_register(0, 0x3e), index),
+				bit(mixer_register(0, 0x30 + 2 * (uint32_t)index), 14));
+		}
+		{
+			scene_layer *backdrop = &scene.layers[LAYER_BACKDROP];
 
-		sprites->shown = true;
-		sprites->z = (float)((control & 0x0f) << 3 | 7);
-		sprites->palette_base = (uint16_t)((((sprite_control & 3) != 3) ? control : sprite_control) & 0x00f0) << 6;
-		sprites->shift = (control >> 8) & 3;
-		colour_of(sprites, color_offsets(0, bit(mixer_register(0, 0x3e), 6), bit(sprite_control, 15)));
+			backdrop->shown = true;
+			backdrop->z = 1 << 3;
+			backdrop->palette_base = (uint16_t)((mixer_register(0, 0x2c) & 0x00f0) << 6);
+			backdrop->shift = (mixer_register(0, 0x2c) >> 8) & 3;
+			offsets[LAYER_BACKDROP] = color_offsets(0, bit(mixer_register(0, 0x3e), 8), bit(mixer_register(0, 0x3e), 14));
+		}
+		scene.group_shift = grouping.shift;
+		scene.group_mask = grouping.mask;
+		scene.sprite_bits = ((1 << grouping.shift) - 1) & 0x3fff;
+		for (int group = 0; group <= grouping.mask; group++)
+		{
+			const uint16_t control = mixer_register(0, 2 * (uint32_t)(grouping.base | group));
+			scene_layer *sprites = &scene.groups[group];
+
+			sprites->shown = true;
+			sprites->z = (float)((control & 0x0f) << 3 | 7);
+			sprites->palette_base = (uint16_t)((((sprite_control & 3) != 3) ? control : sprite_control) & 0x00f0) << 6;
+			sprites->shift = (control >> 8) & 3;
+		}
+		offsets[LAYERS] = color_offsets(0, bit(mixer_register(0, 0x3e), 6), bit(sprite_control, 15));
+		/* (all the shown layers, the sprites and the backdrop the same) */
+		for (int index = LAYER_TEXT; index <= LAYER_BITMAP; index++)
+			if (scene.layers[index].shown && offsets[index] != offsets[LAYER_BACKDROP])
+				uniform = false;
+		if (offsets[LAYERS] != offsets[LAYER_BACKDROP])
+			uniform = false;
+		scene.out.subtract = 0;
+		for (int index = LAYER_TEXT; index <= LAYER_BACKDROP; index++)
+			if (index != LAYER_SPRITES)
+				colour_of(&scene.layers[index], offsets[index], uniform);
+		for (int group = 0; group <= grouping.mask; group++)
+			colour_of(&scene.groups[group], offsets[LAYERS], uniform);
 	}
 }
 
@@ -256,6 +300,7 @@ static s32_scene_quad *new_quad(const scene_layer *layer, int image)
 	quad->colour = 0;
 	quad->modulate = layer->modulate;
 	quad->add = layer->add;
+	quad->weight = 8;
 	return quad;
 }
 
@@ -291,6 +336,11 @@ static int image_with_room(int width, int height, const scene_slot *keep)
 		}
 		scene.backend->image_free(scene.backend->context, oldest->image);
 		oldest->image = 0;
+		if (oldest->shadow_image)
+		{
+			scene.backend->image_free(scene.backend->context, oldest->shadow_image);
+			oldest->shadow_image = 0;
+		}
 	}
 	return image;
 }
@@ -677,7 +727,73 @@ static void text_quads(void)
 	if ((entry = page_of(true, (control >> 4) & 0x1f, control & 7, layer)) == NULL)
 		return;
 	text_update(entry);
+	scene.text_entry = entry;
+	scene.text_quad = scene.out.count;
 	page_quad(layer, entry, 0, 0, 320, HEIGHT, 0, 0, 1, 1);
+	if (scene.text_quad == scene.out.count)
+		scene.text_quad = -1;    /* (nothing drawn) */
+}
+
+/* The text blends where a sprite is under it (video.c's mix: the layer under its pixel is the sprites): its
+   8 x 8 cells over the rectangles of the sprites of the groups it blends with that are under it and over the
+   tilemaps go in quads of their own that blend, by runs along each row of cells */
+static void text_blend_quads(void)
+{
+	static uint8_t under[HEIGHT / 8][40];
+	const scene_layer *layer = &scene.layers[LAYER_TEXT];
+	float highest_tilemap = 0;
+	bool any = false;
+
+	if (!scene.text_blends || scene.text_quad < 0)
+		return;
+	for (int index = LAYER_NBG0; index <= LAYER_BITMAP; index++)
+		if (scene.layers[index].shown && scene.layers[index].z < layer->z && scene.layers[index].z > highest_tilemap)
+			highest_tilemap = scene.layers[index].z;
+	memset(under, 0, sizeof(under));
+	for (int index = 0; index < scene.out.count; index++)
+	{
+		const s32_scene_quad *quad = &scene.quads[index];
+		int group = -1;
+
+		if (quad->z >= layer->z || quad->z <= highest_tilemap || quad->image == 0)
+			continue;
+		for (int at = 0; at <= scene.group_mask; at++)
+			if (quad->z >= scene.groups[at].z && quad->z < scene.groups[at].z + 1)
+				group = at;
+		if (group < 0 || !bit(scene.text_sprite_groups, group))
+			continue;
+		{
+			const float left = quad->x0 < quad->x1 ? quad->x0 : quad->x1, right = quad->x0 < quad->x1 ? quad->x1 : quad->x0;
+			const float top = quad->y0 < quad->y1 ? quad->y0 : quad->y1, bottom = quad->y0 < quad->y1 ? quad->y1 : quad->y0;
+			const int column0 = left < 0 ? 0 : (int)left / 8, column1 = right > 320 ? 39 : ((int)right - 1) / 8;
+			const int row0 = top < 0 ? 0 : (int)top / 8, row1 = bottom > HEIGHT ? HEIGHT / 8 - 1 : ((int)bottom - 1) / 8;
+
+			for (int row = row0; row <= row1; row++)
+				for (int column = column0; column <= column1; column++)
+				{
+					under[row][column] = 1;
+					any = true;
+				}
+		}
+	}
+	if (!any)
+		return;
+	/* the text's quad goes (the last one takes its place), its runs come in */
+	scene.quads[scene.text_quad] = scene.quads[--scene.out.count];
+	for (int row = 0; row < HEIGHT / 8; row++)
+		for (int column = 0; column < 40;)
+		{
+			const int state = under[row][column];
+			const int start = column;
+			const int before = scene.out.count;
+
+			while (column < 40 && under[row][column] == state)
+				column++;
+			page_quad(layer, scene.text_entry, (float)start * 8, (float)row * 8, (float)column * 8, (float)row * 8 + 8,
+				(float)start * 8, (float)row * 8, 1, 1);
+			if (state && scene.out.count > before)
+				scene.quads[before].weight = scene.text_weight;
+		}
 }
 
 /* ---- the bitmap layer: 512 pixels a row from the start of video RAM (video.c's draw_bitmap) ---- */
@@ -1177,11 +1293,12 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 		return NULL;
 	}
 	{
-		const int image = slot->image;
+		const int image = slot->image, shadow_image = slot->shadow_image;
 		const int width = slot->width, height = slot->height;
 
 		*slot = key;
 		slot->image = image;
+		slot->shadow_image = shadow_image;
 		slot->width = width;
 		slot->height = height;
 	}
@@ -1192,11 +1309,17 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 		const int pen_mask = (1 << bits) - 1;
 		const int end_pen = (slot->flags & 4) ? 0 : pen_mask;
 		const int width = power_of_two(wide), height = power_of_two(sprite->rows);
+		bool shadowed = false;
 
 		if (slot->image && (slot->width != width || slot->height != height))
 		{
 			scene.backend->image_free(scene.backend->context, slot->image);
 			slot->image = 0;
+		}
+		if (slot->shadow_image)
+		{
+			scene.backend->image_free(scene.backend->context, slot->shadow_image);
+			slot->shadow_image = 0;
 		}
 		if (!slot->image && !(slot->image = image_with_room(width, height, slot)))
 			return NULL;
@@ -1205,6 +1328,7 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 		for (int row = 0; row < sprite->rows; row++)
 		{
 			uint16_t *out = &scene.pixels[row * width];
+			uint16_t *shadow = &scene.shadow_pixels[row * width];
 			const uint32_t bank = sprite->place >> 20;
 			uint32_t address = (sprite->place & 0xfffff) + (uint32_t)(row * sprite->words);
 			int x = 0;
@@ -1222,9 +1346,18 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 					int pixel;
 
 					pen = (int)(word >> (32 - bits * (index + 1))) & pen_mask;
+					shadow[x] = 0;
 					pixel = (ended || pen == skipped) ? -1 : sprite_pixel(slot, pen);
 					if (pixel >= 0 && ((pixel & 0x7fff) == 0x7fff || ((pixel & scene.sprite_bits) & 0x7ffe) == (0x7ffe & scene.sprite_bits)))
-						pixel = -1;    /* (all ones shows what is below; the shadow pen, without shadows, too) */
+					{
+						/* all ones shows what is below; the shadow pen too, darkened: in the shadow's image */
+						if ((pixel & 0x7fff) != 0x7fff)
+						{
+							shadow[x] = 0x8000;
+							shadowed = true;
+						}
+						pixel = -1;
+					}
 					out[x] = pixel < 0 ? 0 : argb1555(scene.palette[palette_index(slot->palette_base, slot->shift,
 						pixel & scene.sprite_bits)]);
 				}
@@ -1232,11 +1365,17 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 					ended = true;
 			}
 			for (; x < width; x++)
-				out[x] = 0;
+				out[x] = shadow[x] = 0;
 		}
 		scene.backend->image_write(scene.backend->context, slot->image, 0, 0, width, sprite->rows, scene.pixels, width);
 		scene.out.images_drawn++;
 		scene.out.texels_drawn += width * sprite->rows;
+		if (shadowed && (slot->shadow_image = image_with_room(width, height, slot)) != 0)
+		{
+			scene.backend->image_write(scene.backend->context, slot->shadow_image, 0, 0, width, sprite->rows,
+				scene.shadow_pixels, width);
+			scene.out.texels_drawn += width * sprite->rows;
+		}
 	}
 	slot->used = scene.frame;
 	return slot;
@@ -1265,6 +1404,23 @@ static void sprite_quads(void)
 		quad->v0 = sprite->v0;
 		quad->u1 = sprite->u1;
 		quad->v1 = sprite->v1;
+		if (slot->shadow_image)
+		{
+			/* the shadow pen: what is under it at half (video.c's mix: shift_down by 1) */
+			const s32_scene_quad drawn = *quad;
+			s32_scene_quad *shade = new_quad(group, slot->shadow_image);
+
+			if (shade)
+			{
+				const int image = shade->image;
+
+				*shade = drawn;
+				shade->image = image;
+				shade->modulate = 0;
+				shade->add = 0;
+				shade->weight = 4;
+			}
+		}
 	}
 }
 
@@ -1316,6 +1472,8 @@ const s32_scene_frame *s32_scene_build(void)
 	scene.out.images_drawn = 0;
 	scene.out.texels_drawn = 0;
 	scene.missing = 0;
+	scene.out.subtract = 0;
+	scene.text_quad = -1;
 	if (!s32_display_enabled(0))
 	{
 		scene.out.missing = 0;
@@ -1350,6 +1508,7 @@ const s32_scene_frame *s32_scene_build(void)
 	if (scene.layers[LAYER_BITMAP].shown)
 		bitmap_quads();
 	sprite_quads();
+	text_blend_quads();
 	scene.out.missing = scene.missing;
 	return &scene.out;
 }

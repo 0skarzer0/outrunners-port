@@ -1,7 +1,8 @@
 /**
  *    Name:        video_scene_soft.c
  *    Description: the scene's quads drawn in software (s32/video_scene_soft.h): the images in RAM, the quads
- *                 by depth, nearest texels at the pixels' centres as the PowerVR2 takes them. For the computers,
+ *                 by depth, nearest texels at the pixels' centres as the PowerVR2 takes them (blending ones over
+ *                 what is drawn under them). For the computers,
  *                 to set a scene's frame against video.c's
  *    Created:     13-11-2026
  *
@@ -117,10 +118,51 @@ void s32_scene_soft_draw(const s32_scene_frame *frame, uint32_t *rgb, int stride
 				}
 				if (!(texel & 0x8000))
 					continue;
-				rgb[(size_t)y * (size_t)stride + (size_t)x] =
-					channel(texel >> 10 & 31, (int)(quad->modulate >> 16 & 255), (int)(quad->add >> 16 & 255)) << 16 |
-					channel(texel >> 5 & 31, (int)(quad->modulate >> 8 & 255), (int)(quad->add >> 8 & 255)) << 8 |
-					channel(texel & 31, (int)(quad->modulate & 255), (int)(quad->add & 255));
+				{
+					uint32_t *at = &rgb[(size_t)y * (size_t)stride + (size_t)x];
+					uint32_t value =
+						channel(texel >> 10 & 31, (int)(quad->modulate >> 16 & 255), (int)(quad->add >> 16 & 255)) << 16 |
+						channel(texel >> 5 & 31, (int)(quad->modulate >> 8 & 255), (int)(quad->add >> 8 & 255)) << 8 |
+						channel(texel & 31, (int)(quad->modulate & 255), (int)(quad->add & 255));
+
+					if (quad->weight < 8)
+					{
+						/* video.c's blend: (top * weight + under * (8 - weight)) / 8, a 5-bit channel each */
+						uint32_t mixed = 0;
+
+						for (int shift = 3; shift <= 19; shift += 8)
+						{
+							const uint32_t top = value >> shift & 31, under = *at >> shift & 31;
+
+							mixed |= ((top * quad->weight + under * (8u - quad->weight)) >> 3) << shift;
+						}
+						value = mixed;
+					}
+					*at = value;
+				}
+			}
+	}
+	if (frame->subtract)
+	{
+		/* the fade: each 5-bit channel less the offset, floored at zero (video.c adds a negative offset) */
+		int take[3];
+
+		for (int channel = 0; channel < 3; channel++)
+			take[channel] = (int)(((frame->subtract >> (16 - 8 * channel) & 255) * 31 + 127) / 255);
+		for (int y = 0; y < 224; y++)
+			for (int x = 0; x < 320; x++)
+			{
+				uint32_t *at = &rgb[(size_t)y * (size_t)stride + (size_t)x];
+				uint32_t value = 0;
+
+				for (int channel = 0; channel < 3; channel++)
+				{
+					const int shift = 19 - 8 * channel;
+					const int left = (int)(*at >> shift & 31) - take[channel];
+
+					value |= (uint32_t)(left > 0 ? left : 0) << shift;
+				}
+				*at = value;
 			}
 	}
 }

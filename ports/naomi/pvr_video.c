@@ -10,6 +10,9 @@
  *    bitmap, a sprite). Bit 15 is the punch-through's alpha: the pens that are not drawn. Depth is the mixer's
  *    priority (higher in front, compared GEQUAL); the background, untextured quads, the backdrop's colour.
  *    Colour offsets: the vertex colour modulates the texels, the offset colour adds.
+ *    The quads that blend (the text over the sprites, the sprites' shadows) go in the translucent list, their
+ *    weight as the vertices' alpha. A fade's subtraction (the scene's 'subtract') is three translucent quads over
+ *    the whole screen after everything else: 1 - d, plus the amount (the blend saturates), 1 - d again.
  */
 #include <kos.h>
 #include <dc/pvr.h>
@@ -88,7 +91,7 @@ void pvr_video_start(void)
 {
 	pvr_init_params_t params = {
 		/* opaque, opaque modifiers, translucent, translucent modifiers, punch-through */
-		.opb_sizes = { PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_0, PVR_BINSIZE_0, PVR_BINSIZE_16 },
+		.opb_sizes = { PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_16 },
 		.vertex_buf_size = 512 * 1024,
 		.opb_overflow_count = 3,
 	};
@@ -131,7 +134,7 @@ static void quad_vertices(const s32_scene_quad *quad, float width, float height)
 {
 	const float x0 = quad->x0 * 2, x1 = quad->x1 * 2, y0 = quad->y0 * 2 + TOP, y1 = quad->y1 * 2 + TOP;
 	const float u0 = quad->u0 / width, u1 = quad->u1 / width, v0 = quad->v0 / height, v1 = quad->v1 / height;
-	const uint32_t argb = 0xff000000u | quad->modulate;
+	const uint32_t argb = (quad->weight >= 8 ? 0xff000000u : (uint32_t)(quad->weight * 255 / 8) << 24) | quad->modulate;
 
 	send_vertex(PVR_CMD_VERTEX, x0, y1, quad->z, u0, v1, argb, quad->add);
 	send_vertex(PVR_CMD_VERTEX, x0, y0, quad->z, u0, v0, argb, quad->add);
@@ -225,7 +228,7 @@ void pvr_video_frame(pvr_video_stats *stats)
 		const s32_scene_quad *quad = &frame->quads[order[place]];
 		const bool add = quad->add != 0;
 
-		if (!quad->image || !pvr_images.base[quad->image])
+		if (!quad->image || !pvr_images.base[quad->image] || quad->weight < 8)
 			continue;
 		if (quad->image != last_image || add != last_add)
 		{
@@ -241,6 +244,58 @@ void pvr_video_frame(pvr_video_stats *stats)
 			last_add = add;
 		}
 		quad_vertices(quad, (float)pvr_images.width[quad->image], (float)pvr_images.height[quad->image]);
+	}
+	pvr_list_finish();
+
+	/* the quads that blend, then the fade */
+	pvr_list_begin(PVR_LIST_TR_POLY);
+	last_image = -1;
+	for (int place = 0; place < ordered; place++)
+	{
+		const s32_scene_quad *quad = &frame->quads[order[place]];
+
+		if (!quad->image || !pvr_images.base[quad->image] || quad->weight >= 8)
+			continue;
+		if (quad->image != last_image)
+		{
+			pvr_poly_cxt_txr(&context, PVR_LIST_TR_POLY, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
+				pvr_images.width[quad->image], pvr_images.height[quad->image], pvr_images.base[quad->image],
+				PVR_FILTER_NONE);
+			context.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+			context.depth.write = false;
+			context.txr.env = PVR_TXRENV_MODULATEALPHA;
+			context.gen.specular = true;
+			pvr_poly_compile(&header, &context);
+			send_header(&header);
+			last_image = quad->image;
+		}
+		quad_vertices(quad, (float)pvr_images.width[quad->image], (float)pvr_images.height[quad->image]);
+	}
+	if (frame->subtract)
+	{
+		static const struct { pvr_blend_mode_t src, dst; } passes[3] = {
+			{ PVR_BLEND_INVDESTCOLOR, PVR_BLEND_ZERO }, { PVR_BLEND_ONE, PVR_BLEND_ONE }, { PVR_BLEND_INVDESTCOLOR, PVR_BLEND_ZERO }
+		};
+
+		for (int pass = 0; pass < 3; pass++)
+		{
+			s32_scene_quad whole;
+
+			memset(&whole, 0, sizeof(whole));
+			whole.x1 = 320;
+			whole.y1 = 224;
+			whole.z = 1000.0f + (float)pass;    /* (in front of everything, in this order: autosort) */
+			whole.weight = 8;
+			whole.modulate = pass == 1 ? frame->subtract : 0xffffff;
+			pvr_poly_cxt_col(&context, PVR_LIST_TR_POLY);
+			context.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+			context.depth.write = false;
+			context.blend.src = passes[pass].src;
+			context.blend.dst = passes[pass].dst;
+			pvr_poly_compile(&header, &context);
+			send_header(&header);
+			quad_vertices(&whole, 1, 1);
+		}
 	}
 	pvr_list_finish();
 	pvr_scene_finish();

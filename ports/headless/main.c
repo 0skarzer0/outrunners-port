@@ -353,17 +353,26 @@ static void scene_compare(void)
 	total_differ += (uint64_t)differ;
 	total_pixels += 320 * 224;
 	if (frame % 30 == 0)
-		printf("scene %" PRIu64 ": %ld pixels differ (%.2f %%; all %.3f %%), %d quads, %d images drawn (%d texels), missing %04x\n",
-			frame, differ, differ * 100.0 / (320 * 224), total_differ * 100.0 / (double)total_pixels, scene->count,
-			scene->images_drawn, scene->texels_drawn, scene->missing);
+	{
+		int blended = 0, shadows = 0;
+
+		for (int index = 0; index < scene->count; index++)
+		{
+			blended += scene->quads[index].weight < 8 && scene->quads[index].modulate != 0;
+			shadows += scene->quads[index].weight < 8 && scene->quads[index].modulate == 0;
+		}
+		printf("scene %" PRIu64 ": %ld pixels differ (%.2f %%; all %.3f %%), %d quads (%d blend, %d shadow), %d images drawn (%d texels), missing %04x, subtract %06x\n",
+			frame, differ, differ * 100.0 / (320 * 224), total_differ * 100.0 / (double)total_pixels, scene->count, blended, shadows,
+			scene->images_drawn, scene->texels_drawn, scene->missing, (unsigned)scene->subtract);
+	}
 	if (getenv("ORUNNERS_SCENE_QUADS") && (uint64_t)atoll(getenv("ORUNNERS_SCENE_QUADS")) == frame)
 		for (int index = 0; index < scene->count; index++)
 		{
 			const s32_scene_quad *q = &scene->quads[index];
 
-			printf("quad %d: z %.3f image %d (%.1f,%.1f)-(%.1f,%.1f) uv (%.2f,%.2f)-(%.2f,%.2f) colour %04x mod %06x add %06x\n",
+			printf("quad %d: z %.3f image %d (%.1f,%.1f)-(%.1f,%.1f) uv (%.2f,%.2f)-(%.2f,%.2f) colour %04x mod %06x add %06x weight %d\n",
 				index, q->z, q->image, q->x0, q->y0, q->x1, q->y1, q->u0, q->v0, q->u1, q->v1, q->colour, (unsigned)q->modulate,
-				(unsigned)q->add);
+				(unsigned)q->add, q->weight);
 		}
 	if (getenv("ORUNNERS_SCENE_QUADS") && (uint64_t)atoll(getenv("ORUNNERS_SCENE_QUADS")) == frame)
 		for (int image = 1; image < 4096; image++)
