@@ -71,7 +71,7 @@ staged name (give each image a new name, check its md5).
 ## On the board
 
 The controls (values of the Crazy Taxi upright, widening by themselves): wheel analog 0, gas 1, brake 2; the
-two-position shifter forward = SHIFT UP (HIGH), back = SHIFT DOWN (LOW); START; coins by the meters' difference;
+two-position shifter forward = SHIFT UP (HIGH), back = SHIFT DOWN (LOW); START, which is also the coin button (pressing it inserts a coin, letting it go presses START: one tap starts a race); the coin slots too, by the meters' difference;
 SERVICE and TEST as the board's.
 
 Live figures, on the Raspberry of the cabinet (DragonMinded's netdimm.py), with the address `build_naomi.sh`

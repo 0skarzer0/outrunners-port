@@ -63,6 +63,10 @@ static struct
 static int coin_counts_known;
 static uint16_t coin_counts[MIE_JVS_COIN_SLOTS];
 static int coin_frames;
+/* START doubles as the coin button (the cabinet has no free coin button at hand): pressing it inserts a coin,
+   letting it go presses the board's START for a few frames. One tap from the attract mode starts a race */
+static bool start_held;
+static int start_frames;
 
 static int raw_analog(uint16_t raw)
 {
@@ -125,7 +129,11 @@ static void on_controls_update(void)
 		brake = pedal(raw_analog(jvs->brake), &calibration.brake_min, &calibration.brake_max);
 		shift_up = jvs->p1.up;
 		shift_down = jvs->p1.down;
-		start = jvs->p1.start;
+		if (jvs->p1.start && !start_held)
+			coin_frames = 4;
+		if (!jvs->p1.start && start_held)
+			start_frames = 6;
+		start_held = jvs->p1.start;
 		service = jvs->p1.service || jvs->panel.psw.service;
 		test = jvs->system.test || jvs->panel.psw.test;
 		/* the coins by the meters' difference: the driver's pulse arrives already cleared (docs/hardware.md) */
@@ -158,6 +166,11 @@ static void on_controls_update(void)
 	{
 		coin = true;
 		coin_frames--;
+	}
+	if (start_frames > 0 && !coin)
+	{
+		start = true;
+		start_frames--;
 	}
 	/* the 315-5296s' ports are active low */
 	input->port_a[0] = (uint8_t)(0xff & ~(shift_up ? 0x01 : 0) & ~(shift_down ? 0x02 : 0));
