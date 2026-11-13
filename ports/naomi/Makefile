@@ -11,7 +11,9 @@ TARGET = orunners_naomi.elf
 RUNTIME = machine io sound ym3438 memory_census tasks video multipcm multipcm_aica sound_chips sound_cpu \
 	game assets assets_media assets_midi assets_pack json png inflate
 GAME_C := $(shell find $(ROOT)/src -name '*.c')
-OBJS = main.o pvr_video.o aica_sound.o naomi_log.o naomi_dimmfs.o naomi_dimmcomms.o workers_none.o \
+NAOMI_KIT := naomi-kit
+include $(NAOMI_KIT)/kit.mk
+OBJS = main.o pvr_video.o aica_sound.o workers_none.o $(NAOMI_KIT_OBJS) \
 	$(addprefix runtime/,$(addsuffix .o,$(RUNTIME))) \
 	$(patsubst $(ROOT)/src/%.c,game/%.o,$(GAME_C))
 
@@ -19,7 +21,7 @@ OBJS = main.o pvr_video.o aica_sound.o naomi_log.o naomi_dimmfs.o naomi_dimmcomm
 # ORUNNERS_PACKED_PENS: the tiles two pens to a byte (naomi_assets.py). Two tasks of about 3.5 KB of stack each
 # on Linux: 128 KB each is plenty (runtime/src/tasks.c)
 OUR_CFLAGS = -O2 -fno-strict-aliasing -Wno-stringop-overflow -DORUNNERS_NAOMI -DORUNNERS_NO_FM_SYNTHESIS -DORUNNERS_NO_PCM_SYNTHESIS -DORUNNERS_PACKED_PENS -DORUNNERS_VIDEO_ON_HEAP -DORUNNERS_VIDEO_SCENE -DTASK_STACK_SIZE='(128u << 10)' \
-	-I$(ROOT)/runtime/include -I$(ROOT)/src -I. $(EXTRA)
+	-I$(ROOT)/runtime/include -I$(ROOT)/src -I. $(NAOMI_KIT_CFLAGS) $(EXTRA)
 
 all: $(TARGET)
 
@@ -44,6 +46,6 @@ $(TARGET): $(OBJS)
 	kos-cc -o $(TARGET) $(OBJS) -lm
 
 clean:
-	rm -rf $(TARGET) *.o runtime game
+	rm -rf $(TARGET) *.o runtime game $(NAOMI_KIT_OBJS)
 
 .PHONY: all clean

@@ -18,8 +18,6 @@
  */
 #include <kos.h>
 #include <arch/timer.h>
-#include <dc/maple.h>
-#include <dc/maple/mie.h>
 #include <dc/video.h>
 
 #include "s32/machine.h"
@@ -30,7 +28,6 @@
 #include "host/tasks.h"
 
 #include "naomi.h"
-#include "naomi_dimmfs.h"
 #include "pvr_video.h"
 #include "aica_sound.h"
 
@@ -52,140 +49,49 @@ static volatile int naomi_stop_at = ORUNNERS_NAOMI_STAGE;
 #define WHEEL_CENTRE    0x80
 #define WHEEL_RIGHT     0xf0
 
-/* ---- the cabinet's controls (docs/hardware.md of naomi-wheel-games: a Crazy Taxi upright) ---- */
+/* The live figures (naomi.h): peeked at by the Raspberry */
+volatile orunners_naomi_live_t orunners_naomi_live;
 
-static struct
-{
-	int wheel_min, wheel_centre, wheel_max;
-	int gas_min, gas_max;
-	int brake_min, brake_max;
-} calibration = { 8448, 33792, 60160, 11776, 47104, 14080, 47360 };
+/* ---- the cabinet's controls (naomi-kit's nk_cabinet_read: a Crazy Taxi upright's JVS) ---- */
 
-static int coin_counts_known;
-static uint16_t coin_counts[MIE_JVS_COIN_SLOTS];
 static int coin_frames;
-/* START doubles as the coin button (the cabinet has no free coin button at hand): pressing it inserts a coin,
-   letting it go presses the board's START for a few frames. One tap from the attract mode starts a race */
-static bool start_held;
-static int start_frames;
 
-static int raw_analog(uint16_t raw)
+/* the wheel (-128..127) to the board's 0x10-0xf0 */
+static uint8_t board_wheel(int8_t steer)
 {
-	return (int)(raw & MIE_JVS_ANALOG_RAW_MASK);
-}
-
-/* the wheel to the board's 0x10-0xf0, the calibration widening when the wheel goes further */
-static uint8_t steer(int raw)
-{
-	int value;
-
-	if (raw < calibration.wheel_min)
-		calibration.wheel_min = raw;
-	if (raw > calibration.wheel_max)
-		calibration.wheel_max = raw;
-	if (raw < calibration.wheel_centre)
-		value = WHEEL_CENTRE - (calibration.wheel_centre - raw) * (WHEEL_CENTRE - WHEEL_LEFT)
-			/ (calibration.wheel_centre - calibration.wheel_min);
-	else
-		value = WHEEL_CENTRE + (raw - calibration.wheel_centre) * (WHEEL_RIGHT - WHEEL_CENTRE)
-			/ (calibration.wheel_max - calibration.wheel_centre);
-	return (uint8_t)(value < WHEEL_LEFT ? WHEEL_LEFT : (value > WHEEL_RIGHT ? WHEEL_RIGHT : value));
-}
-
-/* a pedal to 0-255, with 6 % at each end so that rest reads 0 and a full press 255 */
-static uint8_t pedal(int raw, int *low, int *high)
-{
-	int margin, from, to;
-
-	if (raw < *low)
-		*low = raw;
-	if (raw > *high)
-		*high = raw;
-	margin = (*high - *low) * 6 / 100;
-	from = *low + margin;
-	to = *high - margin;
-	if (raw <= from)
-		return 0;
-	if (raw >= to)
-		return 255;
-	return (uint8_t)((raw - from) * 255 / (to - from));
+	return (uint8_t)(steer < 0 ? WHEEL_CENTRE + steer * (WHEEL_CENTRE - WHEEL_LEFT) / 128
+		: WHEEL_CENTRE + steer * (WHEEL_RIGHT - WHEEL_CENTRE) / 127);
 }
 
 /* At the start of VBLANK, when the board reads its controls (MAME polls them then too). The shifter's two
-   positions with their spring: forward is shift up (HIGH), back shift down (LOW); the game holds the gear */
+   positions with their spring: forward is shift up (HIGH), back shift down (LOW); the game holds the gear. START
+   is the coin button too (nk_cabinet_start_coin, set in main): a press inserts a coin, the release is START */
 static void on_controls_update(void)
 {
 	s32_inputs *input = &s32_board.input;
-	maple_device_t *device = maple_enum_type(0, MAPLE_FUNC_MIE);
-	const mie_state_t *state = device && device->valid ? (const mie_state_t *)maple_dev_status(device) : NULL;
-	bool shift_up = false, shift_down = false, start = false, coin = false, service = false, test = false;
-	uint8_t wheel = WHEEL_CENTRE, gas = 0, brake = 0;
+	nk_cabinet cabinet;
+	bool coin = false, start;
 
-	if (state)
-	{
-		const mie_jvs_inputs_t *jvs = &state->jvs;
-
-		wheel = steer(raw_analog(jvs->wheel));
-		gas = pedal(raw_analog(jvs->accel), &calibration.gas_min, &calibration.gas_max);
-		brake = pedal(raw_analog(jvs->brake), &calibration.brake_min, &calibration.brake_max);
-		shift_up = jvs->p1.up;
-		shift_down = jvs->p1.down;
-		if (jvs->p1.start && !start_held)
-			coin_frames = 4;
-		if (!jvs->p1.start && start_held)
-			start_frames = 6;
-		start_held = jvs->p1.start;
-		service = jvs->p1.service || jvs->panel.psw.service;
-		test = jvs->system.test || jvs->panel.psw.test;
-		/* the coins by the meters' difference: the driver's pulse arrives already cleared (docs/hardware.md) */
-		for (int slot = 0; slot < MIE_JVS_COIN_SLOTS; slot++)
-		{
-			if (coin_counts_known && jvs->coin[slot].count != coin_counts[slot])
-				coin_frames = 4;
-			coin_counts[slot] = jvs->coin[slot].count;
-		}
-		coin_counts_known = 1;
-	}
-	if (orunners_naomi_live.test_inputs & 0x80000000u)
-	{
-		const uint32_t test = orunners_naomi_live.test_inputs;
-
-		if (test & 1)
-		{
-			coin_frames = 4;
-			orunners_naomi_live.test_inputs &= ~1u;
-		}
-		start = start || (test & 2);
-		shift_up = shift_up || (test & 4);
-		shift_down = shift_down || (test & 8);
-		if (test >> 8 & 0xff)
-			gas = (uint8_t)(test >> 8);
-		if (test >> 16 & 0xff)
-			wheel = (uint8_t)(test >> 16);
-	}
+	nk_cabinet_read(&cabinet);
+	if (cabinet.coins > 0)
+		coin_frames = 4;    /* (the board counts a coin from a pulse of a few frames) */
 	if (coin_frames > 0)
 	{
 		coin = true;
 		coin_frames--;
 	}
-	if (start_frames > 0 && !coin)
-	{
-		start = true;
-		start_frames--;
-	}
+	start = cabinet.start && !coin;
 	/* the 315-5296s' ports are active low */
-	input->port_a[0] = (uint8_t)(0xff & ~(shift_up ? 0x01 : 0) & ~(shift_down ? 0x02 : 0));
+	input->port_a[0] = (uint8_t)(0xff & ~(cabinet.forward ? 0x01 : 0) & ~(cabinet.back ? 0x02 : 0));
 	input->port_b[0] = 0xff;
-	input->port_e[0] = (uint8_t)(0xff & ~(service ? 0x01 : 0) & ~(test ? 0x02 : 0) & ~(coin ? 0x04 : 0)
+	input->port_e[0] = (uint8_t)(0xff & ~(cabinet.service ? 0x01 : 0) & ~(cabinet.test ? 0x02 : 0) & ~(coin ? 0x04 : 0)
 		& ~(start ? 0x10 : 0));
 	input->port_a[1] = input->port_b[1] = input->port_e[1] = 0xff;
-	input->analog[0] = wheel;
-	input->analog[1] = gas;
-	input->analog[2] = brake;
+	input->analog[0] = board_wheel(cabinet.steer);
+	input->analog[1] = cabinet.gas;
+	input->analog[2] = cabinet.brake;
 	input->analog[3] = WHEEL_CENTRE;
 	input->analog[6] = input->analog[7] = 0;
-	orunners_naomi_live.inputs = (uint32_t)wheel | (uint32_t)gas << 8 | (uint32_t)brake << 16
-		| (uint32_t)input->port_e[0] << 24;
 }
 
 /* ---- the time each part takes ---- */
@@ -195,8 +101,8 @@ static uint64_t second_game, second_sound, second_video, second_texels, second_b
 static uint32_t missing_seen;
 static uint32_t second_frames, second_drawn;
 
-/* The last second's figures, from the peek thread once a second (naomi_dimmcomms.c) */
-void naomi_live_second(void)
+/* The last second's figures, from naomi-kit's peek thread once a second */
+static void naomi_live_second(void)
 {
 	const irq_mask_t old = irq_disable();
 	const uint32_t frames = second_frames, drawn = second_drawn;
@@ -217,7 +123,6 @@ void naomi_live_second(void)
 	orunners_naomi_live.build_us = drawn ? (uint32_t)(build / drawn) : 0;
 	orunners_naomi_live.wait_us = drawn ? (uint32_t)(wait / drawn) : 0;
 	orunners_naomi_live.submit_us = drawn ? (uint32_t)(submit / drawn) : 0;
-	++orunners_naomi_live.seconds;
 }
 
 /* ---- the picture: the scene on the PowerVR2 (pvr_video.c) ---- */
@@ -275,7 +180,7 @@ static void on_frame_done(void)
 			frame_worst = total;
 		irq_restore(old);
 	}
-	naomi_frames_alive++;
+	orunners_naomi_live.head.frames_alive++;
 	orunners_naomi_live.frames_total++;
 	if (orunners_naomi_live.frames_total <= 600 && orunners_naomi_live.frames_total % 30 == 1)
 		printf("NAOMI: frame %lu: %lu us (sound %lu, video %lu)\n", (unsigned long)orunners_naomi_live.frames_total,
@@ -311,18 +216,18 @@ static void load_assets(void)
 	const uint64_t start = timer_ms_gettime64();
 
 	if (!input || fseek(input, 0, SEEK_END) != 0 || (size = ftell(input)) <= 0 || fseek(input, 0, SEEK_SET) != 0)
-		naomi_show_log("NO " ASSETS_FILE " (ports/naomi/naomi_assets.py)");
+		nk_show_log("NO " ASSETS_FILE " (ports/naomi/naomi_assets.py)");
 	printf("NAOMI: %s, %ld bytes; %lu bytes of RAM above the heap\n", ASSETS_FILE, size,
-		(unsigned long)naomi_heap_left());
+		(unsigned long)nk_heap_left());
 	if (!(bytes = malloc((size_t)size)))
-		naomi_show_log("NO ROOM FOR THE ASSETS");
-	/* in pieces: the NetDIMM's peeks share the cartridge port and wait for each piece (naomi_dimmcomms.c) */
+		nk_show_log("NO ROOM FOR THE ASSETS");
+	/* in pieces: the NetDIMM's peeks share the cartridge port and wait for each piece (naomi-kit) */
 	for (long done = 0; done < size;)
 	{
 		const size_t piece = size - done > (256 << 10) ? (256 << 10) : (size_t)(size - done);
 
 		if (fread(bytes + done, 1, piece, input) != piece)
-			naomi_show_log("THE ASSETS CANNOT BE READ");
+			nk_show_log("THE ASSETS CANNOT BE READ");
 		done += (long)piece;
 		if ((done & ((4 << 20) - 1)) < (256 << 10) || done == size)
 			printf("NAOMI: %ld of %ld bytes read, %lu ms\n", done, size,
@@ -333,7 +238,7 @@ static void load_assets(void)
 	if ((problem = assets_load_pack_bytes(bytes, (size_t)size)) != NULL)
 	{
 		printf("NAOMI: %s\n", problem);
-		naomi_show_log("THE ASSETS ARE NOT THIS BUILD'S");
+		nk_show_log("THE ASSETS ARE NOT THIS BUILD'S");
 	}
 }
 
@@ -353,8 +258,8 @@ static void run_game_thread(void)
 	kthread_t *thread = thd_create_ex(&attributes, game_thread, NULL);
 
 	if (!thread)
-		naomi_show_log("NO THREAD FOR THE GAME");
-	naomi_watch_thread(thread);
+		nk_show_log("NO THREAD FOR THE GAME");
+	nk_watch_thread(thread);
 	thd_join(thread, NULL);
 }
 
@@ -362,35 +267,44 @@ int main(int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	naomi_boot();
-	naomi_dimmcomms_start();    /* (first: the console can be read through the NetDIMM while the assets load) */
+	{
+		/* the console, /dimm, the peeks (first: the console can be read through the NetDIMM while the assets load),
+		   the watchdog (the boot reads 26 MB through the cartridge port), misaligned accesses (the V60's code) */
+		static const nk_config config = {
+			.title = "OUTRUNNERS (NAOMI)", .live = &orunners_naomi_live.head, .game = "ORUN",
+			.names = ORUNNERS_LIVE_NAMES, .count = ORUNNERS_LIVE_COUNT, .need_dimm = true,
+			.hang_first_s = 120, .hang_s = 10, .misaligned = true, .every_second = naomi_live_second,
+		};
+
+		nk_boot(&config);
+		nk_cabinet_start_coin(6);
+	}
 #if defined(ORUNNERS_NAOMI_STAGE)
 	if (naomi_stop_at == 0)    /* does KallistiOS run, and do the peeks answer? */
 		for (;;)
 		{
 			thd_sleep(1000);
-			naomi_frames_alive++;
+			orunners_naomi_live.head.frames_alive++;
 			orunners_naomi_live.frames_total++;
 			printf("NAOMI: stage 0 alive, %lu s, heap left %lu\n", (unsigned long)orunners_naomi_live.frames_total,
-				(unsigned long)naomi_heap_left());
+				(unsigned long)nk_heap_left());
 		}
 #endif
 	pvr_video_start();
 	load_assets();
-	orunners_naomi_live.heap_left = naomi_heap_left();
-	printf("NAOMI: %lu bytes of RAM left\n", (unsigned long)orunners_naomi_live.heap_left);
+	printf("NAOMI: %lu bytes of RAM left\n", (unsigned long)nk_heap_left());
 #if defined(ORUNNERS_NAOMI_STAGE)
 	if (naomi_stop_at == 1)
 	for (;;)
 	{
 		thd_sleep(1000);
-		naomi_frames_alive++;
+		orunners_naomi_live.head.frames_alive++;
 		orunners_naomi_live.frames_total++;
 	}
 #endif
 
 	if (!s32_video_allocate())
-		naomi_show_log("NO ROOM FOR THE VIDEO");
+		nk_show_log("NO ROOM FOR THE VIDEO");
 	s32_board.irq_changed = on_irq_changed;
 	s32_board.controls_update = on_controls_update;
 	s32_board.log = on_log;
@@ -421,11 +335,11 @@ int main(int argc, char **argv)
 		while (naomi_stop_at == 2)
 		{
 			thd_sleep(100);
-			naomi_frames_alive++;
+			orunners_naomi_live.head.frames_alive++;
 		}
 		printf("NAOMI: poked, the game runs\n");
 	}
 #endif
 	run_game_thread();
-	naomi_show_log("THE GAME STOPPED");
+	nk_show_log("THE GAME STOPPED");
 }

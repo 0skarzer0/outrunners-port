@@ -5,7 +5,7 @@
 #
 # Needs the sh-elf toolchain and KallistiOS built for KOS_SUBARCH=naomi (KOS_NAOMI, default
 # /opt/toolchains/dc/kos-naomi, with naomibintool), a computer's build of the game for its assets (cmake, a C
-# compiler, python3). Output: OUTDIR/orunners_naomi.bin.gz for the WiPi netbooter,
+# compiler, python3), and the naomi-kit submodule (git submodule update --init). Output: OUTDIR/orunners_naomi.bin.gz for the WiPi netbooter,
 # OUTDIR/dimm/orunners.pcm (the MultiPCM's samples, for the AICA: aica_sound.c). What it makes comes from the player's ROM set:
 # never share it.
 set -e
@@ -28,7 +28,7 @@ python3 "$HERE/naomi_assets.py" "$OUT/orunners.assets" "$OUT/dimm/orunners_naomi
 # 4. the netboot image: the program in a NAOMI header, the pack after it in the NetDIMM (/dimm)
 "$KOS_NAOMI/utils/naomibintool/naomibintool" build "$OUT/orunners_naomi-prog.bin" -t "OUTRUNNERS" -d "HOMEBREW" \
 	-e "$HERE/orunners_naomi.elf"
-python3 "$HERE/naomi_pack.py" "$OUT/orunners_naomi-prog.bin" "$OUT/dimm" "$OUT/orunners_naomi.bin"
+python3 "$HERE/naomi-kit/tools/nk_pack.py" "$OUT/orunners_naomi-prog.bin" "$OUT/dimm" "$OUT/orunners_naomi.bin"
 gzip -9 -f "$OUT/orunners_naomi.bin"
 cp "$HERE/orunners_naomi.elf" "$OUT/"
 echo "Netboot image: $OUT/orunners_naomi.bin.gz"

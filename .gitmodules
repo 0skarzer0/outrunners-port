@@ -4,3 +4,6 @@
 [submodule "lan"]
 	path = lan
 	url = https://github.com/cheviman/arcade-lan
+[submodule "ports/naomi/naomi-kit"]
+	path = ports/naomi/naomi-kit
+	url = https://github.com/0skarzer0/naomi-kit
