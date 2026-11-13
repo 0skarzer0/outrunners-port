@@ -39,6 +39,17 @@ void sound_chips_pcm_banks_changing(void);
 /* The frame ends at 'time': the samples that start before it are the frame's */
 void sound_chips_end_frame(uint64_t time);
 
+/* A chip of the port's own that plays the MultiPCM's voices (the NAOMI's AICA): told of every voice register
+   written, after the MultiPCM has taken it (its state is the voice's: s32/multipcm.h), and of every frame's end.
+   With one the MultiPCM makes no samples of its own (silence in the frame's) */
+struct multipcm;
+typedef struct sound_chips_pcm_player
+{
+	void (*voice_written)(const struct multipcm *chip, int voice, int reg);
+	void (*frame_ended)(const struct multipcm *chip);
+} sound_chips_pcm_player;
+void sound_chips_pcm_play_on(const sound_chips_pcm_player *player);
+
 /* The frame's samples of chip 0 (the YM3438) or 1 (the MultiPCM), its two outputs interleaved */
 const int32_t *sound_chips_frame_samples(int chip, size_t *count);
 

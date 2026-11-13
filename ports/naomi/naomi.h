@@ -50,6 +50,7 @@ typedef struct
 	                              coin (cleared once taken), bit 1 START held, bits 8-15 gas, bits 16-23 the wheel
 	                              (0x80 centre; 0 = the cabinet's own), bit 2 shift up held, bit 3 shift down */
 	uint32_t misaligned;       /* +0x78 misaligned loads and stores done a byte at a time (naomi_log.c) */
+	uint32_t sound_writes;     /* +0x7c the AICA's channel registers written (aica_sound.c); 0xffffffff no samples */
 } orunners_naomi_live_t;
 extern volatile orunners_naomi_live_t orunners_naomi_live;
 

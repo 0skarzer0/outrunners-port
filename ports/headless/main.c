@@ -314,6 +314,10 @@ static void network_frame(void)
 }
 #endif
 
+#ifndef ORUNNERS_SCAFFOLD
+#include "aica_model.c"
+#endif
+
 #ifdef ORUNNERS_VIDEO_SCENE
 #include "s32/video_scene_soft.h"
 
@@ -784,6 +788,9 @@ int main(int argc, char **argv)
 #endif
 		sound_chips_attach();
 		sound_cpu_attach();
+#ifndef ORUNNERS_SCAFFOLD
+		aica_model_attach();
+#endif
 		if (sound_hashes_path)
 			sound_hashes = fopen(sound_hashes_path, "w");
 	}

@@ -60,6 +60,7 @@ static struct
 } sound = { .override = NO_TIMER };
 
 static bool sides_together;    /* sound_chips_join_sides */
+static const sound_chips_pcm_player *pcm_player;    /* sound_chips_pcm_play_on */
 
 /* x / d rounded down for d below 65536, with 32-bit divisions only: the SH-4 has no 64-bit division, and libgcc's
    takes a good part of a frame when called for every sound event (ORUNNERS_NAOMI; exact, the same results) */
@@ -190,14 +191,17 @@ static void pcm_catch_up(uint64_t time)
 	{
 		const int count = due - sound.pcm_samples > 256 ? 256 : (int)(due - sound.pcm_samples);
 
-#ifdef ORUNNERS_NO_PCM_SYNTHESIS
-		/* (the NAOMI's first stages: the samples are not in RAM, so the chip would play silence anyway, at a
-		   third of a race's frame on the SH-4; they will play on the AICA) */
-		memset(first, 0, sizeof(first[0]) * (size_t)count);
-		memset(second, 0, sizeof(second[0]) * (size_t)count);
-#else
-		multipcm_generate(&sound.pcm, first, second, count);
+#ifndef ORUNNERS_NO_PCM_SYNTHESIS
+		if (!pcm_player)
+			multipcm_generate(&sound.pcm, first, second, count);
+		else
 #endif
+		{
+			/* (another chip plays the voices, or none: the NAOMI's first stages, where the chip took a third of
+			   a race's frame on the SH-4 for silence; the AICA plays them, sound_chips_pcm_play_on) */
+			memset(first, 0, sizeof(first[0]) * (size_t)count);
+			memset(second, 0, sizeof(second[0]) * (size_t)count);
+		}
 		for (int index = 0; index < count; index++)
 			append(&sound.pcm_buffer, first[index], second[index]);
 		sound.pcm_samples += (uint64_t)count;
@@ -214,6 +218,13 @@ static void pcm_write(int offset, uint8_t data)
 {
 	pcm_catch_up(now());
 	multipcm_write(&sound.pcm, offset, data);
+	if (pcm_player && offset == 0 && sound.pcm.address < 11 && sound.pcm.current_voice >= 0)
+		pcm_player->voice_written(&sound.pcm, sound.pcm.current_voice, sound.pcm.address);
+}
+
+void sound_chips_pcm_play_on(const sound_chips_pcm_player *player)
+{
+	pcm_player = player;
 }
 
 void sound_chips_pcm_banks_changing(void)
@@ -318,6 +329,8 @@ void sound_chips_end_frame(uint64_t time)
 
 	fm_catch_up(time);
 	pcm_catch_up(time);
+	if (pcm_player)
+		pcm_player->frame_ended(&sound.pcm);
 	hash = take(&sound.fm_buffer, divide(time + FM_PERIOD - 1, (uint32_t)FM_PERIOD), hash, 0);
 	sound.frame_hash = take(&sound.pcm_buffer, divide(time + PCM_PERIOD - 1, (uint32_t)PCM_PERIOD), hash, 1);
 	mix();

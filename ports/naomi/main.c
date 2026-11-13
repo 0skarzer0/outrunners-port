@@ -32,6 +32,7 @@
 #include "naomi.h"
 #include "naomi_dimmfs.h"
 #include "pvr_video.h"
+#include "aica_sound.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -242,6 +243,8 @@ static void on_frame_shown(void)
 		missing_seen |= stats.missing;
 	}
 	orunners_naomi_live.quads = (uint32_t)stats.quads;
+	if (orunners_naomi_live.sound_writes != 0xffffffffu)
+		orunners_naomi_live.sound_writes = aica_sound_register_writes();
 	orunners_naomi_live.missing = missing_seen;
 	orunners_naomi_live.video_memory_free = stats.video_memory_free;
 	orunners_naomi_live.textures = (uint32_t)stats.images | (uint32_t)stats.failed << 16;
@@ -404,6 +407,8 @@ int main(int argc, char **argv)
 	printf("NAOMI: %s\n", "sound_chips_attach();");
 	sound_chips_attach();
 	sound_cpu_attach();
+	if (!aica_sound_start())
+		orunners_naomi_live.sound_writes = 0xffffffffu;
 	printf("NAOMI: %s\n", "program_reset();");
 	program_reset();
 	program_frame_done = on_frame_done;

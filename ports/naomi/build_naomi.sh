@@ -6,7 +6,7 @@
 # Needs the sh-elf toolchain and KallistiOS built for KOS_SUBARCH=naomi (KOS_NAOMI, default
 # /opt/toolchains/dc/kos-naomi, with naomibintool), a computer's build of the game for its assets (cmake, a C
 # compiler, python3). Output: OUTDIR/orunners_naomi.bin.gz for the WiPi netbooter,
-# OUTDIR/orunners.pcm (the MultiPCM's samples, for a later stage). What it makes comes from the player's ROM set:
+# OUTDIR/dimm/orunners.pcm (the MultiPCM's samples, for the AICA: aica_sound.c). What it makes comes from the player's ROM set:
 # never share it.
 set -e
 ROM=$(realpath "${1:?usage: build_naomi.sh orunners.zip [OUTDIR]}")
@@ -22,7 +22,7 @@ make -C "$OUT/host" -j"$(nproc)" orunners_game_headless orunners_assets >> "$OUT
 "$REPO/build/bin/orunners_game_headless" --frames 1 --hashes /dev/null --assets "$REPO/assets" \
 	--write-pack "$OUT/orunners.assets" > /dev/null
 # 2. the NAOMI's pack: tiles two pens to a byte, the samples apart
-python3 "$HERE/naomi_assets.py" "$OUT/orunners.assets" "$OUT/dimm/orunners_naomi.assets" "$OUT/orunners.pcm"
+python3 "$HERE/naomi_assets.py" "$OUT/orunners.assets" "$OUT/dimm/orunners_naomi.assets" "$OUT/dimm/orunners.pcm"
 # 3. the program
 (source "$KOS_NAOMI/environ.sh" && make -C "$HERE" -j"$(nproc)")
 # 4. the netboot image: the program in a NAOMI header, the pack after it in the NetDIMM (/dimm)

@@ -67,6 +67,7 @@ add_library(s32runtime STATIC
 	runtime/src/video_scene_soft.c
 	runtime/src/workers.c
 	runtime/src/multipcm.c
+	runtime/src/multipcm_aica.c
 	runtime/src/sound_chips.c
 )
 target_include_directories(s32runtime PUBLIC runtime/include)
