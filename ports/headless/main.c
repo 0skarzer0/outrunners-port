@@ -314,8 +314,119 @@ static void network_frame(void)
 }
 #endif
 
+#ifdef ORUNNERS_VIDEO_SCENE
+#include "s32/video_scene_soft.h"
+
+/* ORUNNERS_SCENE_COMPARE=DIR: every frame the scene's quads drawn in software against video.c's frame (the
+   left screen): a line every 30 frames, the pixels that differ, and both pictures every 600 in DIR */
+static void scene_compare(void)
+{
+	static int state;    /* 0 not looked at, 1 on, 2 off */
+	static const char *dir;
+	static uint32_t pixels[224 * 320];
+	static uint64_t total_differ, total_pixels;
+	const uint64_t frame = program_frames() - 1;
+	int width;
+	const uint32_t *board;
+	const s32_scene_frame *scene;
+	long differ = 0;
+
+	if (state == 0)
+	{
+		dir = getenv("ORUNNERS_SCENE_COMPARE");
+		state = dir ? 1 : 2;
+		if (dir)
+		{
+			s32_scene_start(s32_scene_soft_backend(3l << 20), false);    /* (6 MB of 16-bit texels) */
+			s32_scene_follow_frames(true);
+		}
+	}
+	if (state != 1)
+		return;
+	if (!(scene = s32_scene_last()))
+		return;
+	s32_scene_soft_draw(scene, pixels, 320);
+	board = s32_video_frame(0, &width);
+	for (int y = 0; y < 224; y++)
+		for (int x = 0; x < 320; x++)
+			differ += (board[(size_t)y * S32_VIDEO_MAX_WIDTH + (size_t)x] & 0xf8f8f8) != pixels[y * 320 + x];
+	total_differ += (uint64_t)differ;
+	total_pixels += 320 * 224;
+	if (frame % 30 == 0)
+		printf("scene %" PRIu64 ": %ld pixels differ (%.2f %%; all %.3f %%), %d quads, %d images drawn (%d texels), missing %04x\n",
+			frame, differ, differ * 100.0 / (320 * 224), total_differ * 100.0 / (double)total_pixels, scene->count,
+			scene->images_drawn, scene->texels_drawn, scene->missing);
+	if (getenv("ORUNNERS_SCENE_QUADS") && (uint64_t)atoll(getenv("ORUNNERS_SCENE_QUADS")) == frame)
+		for (int index = 0; index < scene->count; index++)
+		{
+			const s32_scene_quad *q = &scene->quads[index];
+
+			printf("quad %d: z %.3f image %d (%.1f,%.1f)-(%.1f,%.1f) uv (%.2f,%.2f)-(%.2f,%.2f) colour %04x mod %06x add %06x\n",
+				index, q->z, q->image, q->x0, q->y0, q->x1, q->y1, q->u0, q->v0, q->u1, q->v1, q->colour, (unsigned)q->modulate,
+				(unsigned)q->add);
+		}
+	if (getenv("ORUNNERS_SCENE_QUADS") && (uint64_t)atoll(getenv("ORUNNERS_SCENE_QUADS")) == frame)
+		for (int image = 1; image < 4096; image++)
+		{
+			int w, h;
+			const uint16_t *texels = s32_scene_soft_image(image, &w, &h);
+			char path[1024];
+			FILE *out;
+
+			if (!texels || w < 512)
+				continue;
+			snprintf(path, sizeof(path), "%s/image_%d.ppm", dir, image);
+			if ((out = fopen(path, "wb")) != NULL)
+			{
+				fprintf(out, "P6 %d %d 255\n", w, h);
+				for (int i = 0; i < w * h; i++)
+				{
+					const uint16_t t = texels[i];
+					fputc(t & 0x8000 ? (t >> 10 & 31) << 3 : 255, out);
+					fputc(t & 0x8000 ? (t >> 5 & 31) << 3 : 0, out);
+					fputc(t & 0x8000 ? (t & 31) << 3 : 255, out);
+				}
+				fclose(out);
+			}
+		}
+	if ((frame % 600 == 0 && frame) || (getenv("ORUNNERS_SCENE_DUMP") && (uint64_t)atoll(getenv("ORUNNERS_SCENE_DUMP")) == frame))
+	{
+		char path[1024];
+		FILE *out;
+
+		snprintf(path, sizeof(path), "%s/scene_%" PRIu64 ".ppm", dir, frame);
+		if ((out = fopen(path, "wb")) != NULL)
+		{
+			fprintf(out, "P6 640 224 255\n");
+			for (int y = 0; y < 224; y++)
+			{
+				for (int x = 0; x < 320; x++)
+				{
+					const uint32_t p = board[(size_t)y * S32_VIDEO_MAX_WIDTH + (size_t)x];
+					fputc((int)(p >> 16 & 255), out);
+					fputc((int)(p >> 8 & 255), out);
+					fputc((int)(p & 255), out);
+				}
+				for (int x = 0; x < 320; x++)
+				{
+					const uint32_t p = pixels[y * 320 + x];
+					fputc((int)(p >> 16 & 255), out);
+					fputc((int)(p >> 8 & 255), out);
+					fputc((int)(p & 255), out);
+				}
+			}
+			fclose(out);
+		}
+	}
+}
+#endif
+
 static void on_frame_done(void)
 {
+#ifdef ORUNNERS_VIDEO_SCENE
+	if (video_hashes)
+		scene_compare();
+#endif
 	if (hashes)
 		fprintf(hashes, "%" PRIu64 " %016" PRIx64 "\n", program_frames() - 1, s32_state_hash());
 	if (dump_dir && program_frames() - 1 == dump_frame)

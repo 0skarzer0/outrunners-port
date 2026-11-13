@@ -1,0 +1,135 @@
+/**
+ *    Name:        video_scene_soft.c
+ *    Description: the scene's quads drawn in software (s32/video_scene_soft.h): the images in RAM, the quads
+ *                 by depth, nearest texels at the pixels' centres as the PowerVR2 takes them. For the computers,
+ *                 to set a scene's frame against video.c's
+ *    Created:     13-11-2026
+ *
+ *    license:BSD-3-Clause
+ */
+#include "s32/video_scene_soft.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#define IMAGES 4096
+
+static struct
+{
+	uint16_t *texels[IMAGES];
+	int width[IMAGES], height[IMAGES];
+	long budget;          /* texels left, as a video memory would have */
+} soft;
+
+static int soft_create(void *context, int width, int height)
+{
+	(void)context;
+	if ((long)width * height > soft.budget)
+		return 0;
+	for (int image = 1; image < IMAGES; image++)
+		if (!soft.texels[image])
+		{
+			soft.texels[image] = (uint16_t *)calloc((size_t)width * (size_t)height, sizeof(uint16_t));
+			soft.width[image] = width;
+			soft.height[image] = height;
+			soft.budget -= (long)width * height;
+			return image;
+		}
+	return 0;
+}
+
+static void soft_free(void *context, int image)
+{
+	(void)context;
+	if (image > 0 && image < IMAGES && soft.texels[image])
+	{
+		soft.budget += (long)soft.width[image] * soft.height[image];
+		free(soft.texels[image]);
+		soft.texels[image] = NULL;
+	}
+}
+
+static void soft_write(void *context, int image, int x, int y, int width, int height, const uint16_t *pixels, int stride)
+{
+	(void)context;
+	for (int row = 0; row < height; row++)
+		memcpy(&soft.texels[image][(size_t)(y + row) * (size_t)soft.width[image] + (size_t)x], &pixels[(size_t)row * (size_t)stride],
+			(size_t)width * sizeof(uint16_t));
+}
+
+static const s32_scene_backend backend = { NULL, soft_create, soft_free, soft_write };
+
+const s32_scene_backend *s32_scene_soft_backend(long texels)
+{
+	soft.budget = texels;
+	return &backend;
+}
+
+static int by_depth(const void *a, const void *b)
+{
+	const s32_scene_quad *const *first = (const s32_scene_quad *const *)a;
+	const s32_scene_quad *const *second = (const s32_scene_quad *const *)b;
+
+	if ((*first)->z != (*second)->z)
+		return (*first)->z < (*second)->z ? -1 : 1;
+	return *first < *second ? -1 : 1;
+}
+
+/* a 5-bit channel after the quad's colour: as video.c's frames hold it (the value << 3) */
+static uint32_t channel(int value, int modulate, int add)
+{
+	value = value * modulate / 255 + (add * 31 + 127) / 255;
+	return (uint32_t)(value > 31 ? 31 : value) << 3;
+}
+
+void s32_scene_soft_draw(const s32_scene_frame *frame, uint32_t *rgb, int stride)
+{
+	static const s32_scene_quad *order[4096];
+	const int count = frame->count < 4096 ? frame->count : 4096;
+
+	for (int y = 0; y < 224; y++)
+		memset(&rgb[(size_t)y * (size_t)stride], 0, 320 * sizeof(uint32_t));
+	for (int index = 0; index < count; index++)
+		order[index] = &frame->quads[index];
+	qsort(order, (size_t)count, sizeof(order[0]), by_depth);
+	for (int index = 0; index < count; index++)
+	{
+		const s32_scene_quad *quad = order[index];
+		const float du = (quad->u1 - quad->u0) / (quad->x1 - quad->x0);
+		const float dv = (quad->v1 - quad->v0) / (quad->y1 - quad->y0);
+
+		for (int y = (int)quad->y0; y < (int)quad->y1 && y < 224; y++)
+			for (int x = (int)quad->x0; x < (int)quad->x1 && x < 320; x++)
+			{
+				uint16_t texel = quad->colour;
+
+				if (x < 0 || y < 0)
+					continue;
+				if (quad->image)
+				{
+					int u = (int)(quad->u0 + ((float)x + 0.5f - quad->x0) * du);
+					int v = (int)(quad->v0 + ((float)y + 0.5f - quad->y0) * dv);
+					const int width = soft.width[quad->image], height = soft.height[quad->image];
+
+					u = u < 0 ? 0 : (u >= width ? width - 1 : u);
+					v = v < 0 ? 0 : (v >= height ? height - 1 : v);
+					texel = soft.texels[quad->image][(size_t)v * (size_t)width + (size_t)u];
+				}
+				if (!(texel & 0x8000))
+					continue;
+				rgb[(size_t)y * (size_t)stride + (size_t)x] =
+					channel(texel >> 10 & 31, (int)(quad->modulate >> 16 & 255), (int)(quad->add >> 16 & 255)) << 16 |
+					channel(texel >> 5 & 31, (int)(quad->modulate >> 8 & 255), (int)(quad->add >> 8 & 255)) << 8 |
+					channel(texel & 31, (int)(quad->modulate & 255), (int)(quad->add & 255));
+			}
+	}
+}
+
+const uint16_t *s32_scene_soft_image(int image, int *width, int *height)
+{
+	if (image <= 0 || image >= IMAGES || !soft.texels[image])
+		return NULL;
+	*width = soft.width[image];
+	*height = soft.height[image];
+	return soft.texels[image];
+}

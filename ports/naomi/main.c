@@ -31,6 +31,7 @@
 
 #include "naomi.h"
 #include "naomi_dimmfs.h"
+#include "pvr_video.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -136,6 +137,23 @@ static void on_controls_update(void)
 		}
 		coin_counts_known = 1;
 	}
+	if (orunners_naomi_live.test_inputs & 0x80000000u)
+	{
+		const uint32_t test = orunners_naomi_live.test_inputs;
+
+		if (test & 1)
+		{
+			coin_frames = 4;
+			orunners_naomi_live.test_inputs &= ~1u;
+		}
+		start = start || (test & 2);
+		shift_up = shift_up || (test & 4);
+		shift_down = shift_down || (test & 8);
+		if (test >> 8 & 0xff)
+			gas = (uint8_t)(test >> 8);
+		if (test >> 16 & 0xff)
+			wheel = (uint8_t)(test >> 16);
+	}
 	if (coin_frames > 0)
 	{
 		coin = true;
@@ -159,7 +177,8 @@ static void on_controls_update(void)
 /* ---- the time each part takes ---- */
 
 static uint64_t frame_started, video_time, sound_time, frame_worst;
-static uint64_t second_game, second_sound, second_video;
+static uint64_t second_game, second_sound, second_video, second_texels, second_build, second_wait, second_submit;
+static uint32_t missing_seen;
 static uint32_t second_frames, second_drawn;
 
 /* The last second's figures, from the peek thread once a second (naomi_dimmcomms.c) */
@@ -168,9 +187,11 @@ void naomi_live_second(void)
 	const irq_mask_t old = irq_disable();
 	const uint32_t frames = second_frames, drawn = second_drawn;
 	const uint64_t game = second_game, sound = second_sound, video = second_video, worst = frame_worst;
+	const uint64_t texels = second_texels, build = second_build, wait = second_wait, submit = second_submit;
 
 	second_frames = second_drawn = 0;
-	second_game = second_sound = second_video = frame_worst = 0;
+	second_game = second_sound = second_video = frame_worst = second_texels = 0;
+	second_build = second_wait = second_submit = 0;
 	irq_restore(old);
 	orunners_naomi_live.game_frames = frames;
 	orunners_naomi_live.drawn_frames = drawn;
@@ -178,64 +199,39 @@ void naomi_live_second(void)
 	orunners_naomi_live.sound_us = frames ? (uint32_t)(sound / frames) : 0;
 	orunners_naomi_live.video_us = drawn ? (uint32_t)(video / drawn) : 0;
 	orunners_naomi_live.worst_frame_us = (uint32_t)worst;
+	orunners_naomi_live.texels_drawn = (uint32_t)texels;
+	orunners_naomi_live.build_us = drawn ? (uint32_t)(build / drawn) : 0;
+	orunners_naomi_live.wait_us = drawn ? (uint32_t)(wait / drawn) : 0;
+	orunners_naomi_live.submit_us = drawn ? (uint32_t)(submit / drawn) : 0;
 	++orunners_naomi_live.seconds;
 }
 
-/* ---- the picture: video.c's frame, doubled, in a 640 x 480 RGB565 framebuffer ---- */
+/* ---- the picture: the scene on the PowerVR2 (pvr_video.c) ---- */
 
-static void show_frame(void)
-{
-	int width;
-	const uint32_t *frame = s32_video_frame(0, &width);
-	const int top = (480 - 2 * S32_VIDEO_HEIGHT) / 2;
-	const int left = (640 - 2 * (width > 320 ? 320 : width)) / 2;
 
-	for (int y = 0; y < S32_VIDEO_HEIGHT; y++)
-	{
-		const uint32_t *row = frame + (size_t)y * S32_VIDEO_MAX_WIDTH;
-		uint32_t *out0 = (uint32_t *)(vram_s + (size_t)(top + 2 * y) * 640 + left);
-		uint32_t *out1 = (uint32_t *)(vram_s + (size_t)(top + 2 * y + 1) * 640 + left);
-
-		/* (32-bit writes: the VRAM takes no byte writes, docs/hardware.md) */
-		for (int x = 0; x < 320 && x < width; x++)
-		{
-			const uint32_t pixel = row[x];
-			const uint32_t colour = (pixel >> 8 & 0xf800) | (pixel >> 5 & 0x07e0) | (pixel >> 3 & 0x001f);
-
-			out0[x] = out1[x] = colour | colour << 16;
-		}
-	}
-}
-
-/* Whether this frame is drawn: video.c's sprites and mix only for the screens shown, so on the other frames
-   it is told there is no screen at all (s32_video_show_screens(0)) and costs little */
-static bool drawing;
-
-static void choose_drawing(void)
-{
-	static uint32_t count;
-	uint32_t every = orunners_naomi_live.draw_every;
-
-	if (every < 1 || every > 600)
-		every = 4;
-	count++;
-	drawing = count % every == 0;
-	/* (the frame before a drawn one too: the sprites drawn in a frame may be the ones the next one shows) */
-	s32_video_show_screens(drawing || (count + 1) % every == 0 ? 1 : 0);
-}
-
-/* When the board's frame is shown (VBLANK) */
+/* When the board's frame is shown (VBLANK): its scene, to the PowerVR2 */
 static void on_frame_shown(void)
 {
-	uint64_t start;
+	const uint64_t start = timer_us_gettime64();
+	pvr_video_stats stats;
 
-	if (!drawing)
-		return;
-	start = timer_us_gettime64();
-	s32_video_draw_frame();
-	show_frame();
+	pvr_video_frame(&stats);
 	video_time += timer_us_gettime64() - start;
 	second_drawn++;
+	second_texels += (uint64_t)stats.texels_drawn;
+	second_build += stats.build_us;
+	second_wait += stats.wait_us;
+	second_submit += stats.submit_us;
+	if (stats.missing & ~missing_seen)
+	{
+		printf("NAOMI: frame %lu needs what the scene does not draw: %04lx\n", (unsigned long)orunners_naomi_live.frames_total,
+			(unsigned long)stats.missing);
+		missing_seen |= stats.missing;
+	}
+	orunners_naomi_live.quads = (uint32_t)stats.quads;
+	orunners_naomi_live.missing = missing_seen;
+	orunners_naomi_live.video_memory_free = stats.video_memory_free;
+	orunners_naomi_live.textures = (uint32_t)stats.images | (uint32_t)stats.failed << 16;
 }
 
 static void on_frame_done(void)
@@ -269,10 +265,8 @@ static void on_frame_done(void)
 		printf("NAOMI: frame %lu: %lu us (sound %lu, video %lu)\n", (unsigned long)orunners_naomi_live.frames_total,
 			(unsigned long)(now - frame_started), (unsigned long)sound_time, (unsigned long)video_time);
 	video_time = sound_time = 0;
-	choose_drawing();
 
-	/* no faster than the board: a frame is 1/60 s (the 31 kHz monitor's vblank is 60 Hz too) */
-	vid_waitvbl();
+	/* (no faster than the board: the PowerVR2 takes a new scene once a vblank, pvr_video_frame waits for it) */
 	frame_started = timer_us_gettime64();
 }
 
@@ -365,8 +359,7 @@ int main(int argc, char **argv)
 				(unsigned long)naomi_heap_left());
 		}
 #endif
-	vid_set_mode(DM_640x480, PM_RGB565);
-	vid_clear(0, 0, 0);
+	pvr_video_start();
 	load_assets();
 	orunners_naomi_live.heap_left = naomi_heap_left();
 	printf("NAOMI: %lu bytes of RAM left\n", (unsigned long)orunners_naomi_live.heap_left);
@@ -390,7 +383,7 @@ int main(int argc, char **argv)
 	printf("NAOMI: %s\n", "s32_init(NULL);");
 	s32_init(NULL);
 	s32_video_init_graphics(assets_graphics());
-	choose_drawing();    /* (one screen at most, the cabinet's: s32_video_show_screens) */
+	s32_video_show_screens(1);
 	s32_board.frame_shown = on_frame_shown;
 	s32_board.sound_at = assets_sound_data;
 	s32_board.sound_byte_at = assets_sound_byte;

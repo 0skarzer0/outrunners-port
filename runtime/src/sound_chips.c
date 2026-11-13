@@ -190,7 +190,14 @@ static void pcm_catch_up(uint64_t time)
 	{
 		const int count = due - sound.pcm_samples > 256 ? 256 : (int)(due - sound.pcm_samples);
 
+#ifdef ORUNNERS_NO_PCM_SYNTHESIS
+		/* (the NAOMI's first stages: the samples are not in RAM, so the chip would play silence anyway, at a
+		   third of a race's frame on the SH-4; they will play on the AICA) */
+		memset(first, 0, sizeof(first[0]) * (size_t)count);
+		memset(second, 0, sizeof(second[0]) * (size_t)count);
+#else
 		multipcm_generate(&sound.pcm, first, second, count);
+#endif
 		for (int index = 0; index < count; index++)
 			append(&sound.pcm_buffer, first[index], second[index]);
 		sound.pcm_samples += (uint64_t)count;

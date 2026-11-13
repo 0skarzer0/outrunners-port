@@ -123,11 +123,175 @@ void naomi_show_log(const char *why)
 	show_log(why, 0);
 }
 
+/* ---- misaligned loads and stores ----
+
+   The V60 reads and writes words at any address, and the game's C does as its code did (src/objects/scenery.c's
+   flashing scenery reads a palette list at an odd address, found on the board, 2026-11-13); the SH-4 takes an
+   address error instead. The handler does the access a byte at a time (little endian, as the SH-4's) and goes
+   on after the instruction (in a branch's delay slot too: then the branch is done as well). Not the FPU's
+   moves: those stay errors. */
+
+static uint32_t load_bytes(uint32_t address, int size)
+{
+	const volatile uint8_t *at = (const volatile uint8_t *)(uintptr_t)address;
+	uint32_t value = 0;
+
+	for (int index = size - 1; index >= 0; index--)
+		value = value << 8 | at[index];
+	return size == 2 ? (uint32_t)(int32_t)(int16_t)value : value;
+}
+
+static void store_bytes(uint32_t address, uint32_t value, int size)
+{
+	volatile uint8_t *at = (volatile uint8_t *)(uintptr_t)address;
+
+	for (int index = 0; index < size; index++, value >>= 8)
+		at[index] = (uint8_t)value;
+}
+
+static bool emulate_access(irq_context_t *context, uint16_t op)
+{
+	const int n = op >> 8 & 15, m = op >> 4 & 15, low = op & 15;
+	uint32_t *r = context->r;
+
+	switch (op >> 12)
+	{
+		case 0x6:    /* mov.w/l @Rm,Rn and @Rm+,Rn */
+			if (low == 1 || low == 2)
+				r[n] = load_bytes(r[m], low == 1 ? 2 : 4);
+			else if (low == 5 || low == 6)
+			{
+				const int size = low == 5 ? 2 : 4;
+				const uint32_t value = load_bytes(r[m], size);
+
+				if (n != m)
+					r[m] += (uint32_t)size;
+				r[n] = value;
+			}
+			else
+				return false;
+			break;
+		case 0x5:    /* mov.l @(disp,Rm),Rn */
+			r[n] = load_bytes(r[m] + (uint32_t)(low * 4), 4);
+			break;
+		case 0x2:    /* mov.w/l Rm,@Rn and Rm,@-Rn */
+			if (low == 1 || low == 2)
+				store_bytes(r[n], r[m], low == 1 ? 2 : 4);
+			else if (low == 5 || low == 6)
+			{
+				const int size = low == 5 ? 2 : 4;
+
+				store_bytes(r[n] - (uint32_t)size, r[m], size);
+				r[n] -= (uint32_t)size;
+			}
+			else
+				return false;
+			break;
+		case 0x1:    /* mov.l Rm,@(disp,Rn) */
+			store_bytes(r[n] + (uint32_t)(low * 4), r[m], 4);
+			break;
+		case 0x0:    /* @(R0,Rm) and @(R0,Rn) */
+			if (low == 0xd || low == 0xe)
+				r[n] = load_bytes(r[0] + r[m], low == 0xd ? 2 : 4);
+			else if (low == 5 || low == 6)
+				store_bytes(r[0] + r[n], r[m], low == 5 ? 2 : 4);
+			else
+				return false;
+			break;
+		case 0x8:
+			if (n == 5)         /* mov.w @(disp,Rm),R0 */
+				r[0] = load_bytes(r[m] + (uint32_t)(low * 2), 2);
+			else if (n == 1)    /* mov.w R0,@(disp,Rn) */
+				store_bytes(r[m] + (uint32_t)(low * 2), r[0], 2);
+			else
+				return false;
+			break;
+		case 0xc:
+			switch (n)
+			{
+				case 1: store_bytes(context->gbr + (uint32_t)(op & 0xff) * 2, r[0], 2); break;
+				case 2: store_bytes(context->gbr + (uint32_t)(op & 0xff) * 4, r[0], 4); break;
+				case 5: r[0] = load_bytes(context->gbr + (uint32_t)(op & 0xff) * 2, 2); break;
+				case 6: r[0] = load_bytes(context->gbr + (uint32_t)(op & 0xff) * 4, 4); break;
+				default: return false;
+			}
+			break;
+		default:
+			return false;
+	}
+	return true;
+}
+
+/* A delayed branch, its target if it is taken (in *target; *taken), whether it is one at all */
+static bool delayed_branch(const irq_context_t *context, uint16_t op, uint32_t *target, bool *taken)
+{
+	const uint32_t pc = context->pc;
+	const int n = op >> 8 & 15;
+
+	*taken = true;
+	if ((op & 0xf000) == 0xa000 || (op & 0xf000) == 0xb000)    /* bra, bsr */
+		*target = pc + 4 + (uint32_t)((int32_t)((op & 0xfff) << 20) >> 19);
+	else if ((op & 0xff00) == 0x8d00 || (op & 0xff00) == 0x8f00)    /* bt/s, bf/s */
+	{
+		*target = pc + 4 + (uint32_t)((int32_t)(int8_t)(op & 0xff) * 2);
+		*taken = ((context->sr & 1) != 0) == ((op & 0xff00) == 0x8d00);
+	}
+	else if ((op & 0xf0ff) == 0x402b || (op & 0xf0ff) == 0x400b)    /* jmp, jsr @Rn */
+		*target = context->r[n];
+	else if (op == 0x000b)    /* rts */
+		*target = context->pr;
+	else if ((op & 0xf0ff) == 0x0023 || (op & 0xf0ff) == 0x0003)    /* braf, bsrf Rn */
+		*target = pc + 4 + context->r[n];
+	else
+		return false;
+	return true;
+}
+
+static bool emulate_misaligned(irq_context_t *context)
+{
+	const uint16_t op = *(const uint16_t *)(uintptr_t)context->pc;
+	uint32_t target;
+	bool taken;
+
+	if (delayed_branch(context, op, &target, &taken))
+	{
+		/* the access is in the branch's delay slot: it, then the branch */
+		const uint32_t after = context->pc + 4;
+		const bool subroutine = (op & 0xf000) == 0xb000 || (op & 0xf0ff) == 0x400b || (op & 0xf0ff) == 0x0003;
+
+		if (!emulate_access(context, *(const uint16_t *)(uintptr_t)(context->pc + 2)))
+			return false;
+		if (subroutine)
+			context->pr = after;
+		context->pc = taken ? target : after;
+	}
+	else
+	{
+		if (!emulate_access(context, op))
+			return false;
+		context->pc += 2;
+	}
+	orunners_naomi_live.misaligned++;
+	return true;
+}
+
 /* An exception nothing handles (an address error, an illegal instruction...): where it was, then the console on
    the screen. Without this KallistiOS prints the registers and stops, and a cabinet shows black */
 static void on_exception(irq_t code, irq_context_t *context, void *data)
 {
 	(void)data;
+	if ((code == EXC_DATA_ADDRESS_READ || code == EXC_DATA_ADDRESS_WRITE) && emulate_misaligned(context))
+	{
+		static uint32_t told;
+
+		if (told < 8)
+		{
+			told++;
+			printf("NAOMI: a misaligned access (address %08lx), done a byte at a time\n",
+				(unsigned long)*(volatile uint32_t *)0xff00000c);
+		}
+		return;
+	}
 	printf("NAOMI EXCEPTION %03lx at pc %08lx pr %08lx, address %08lx, r15 %08lx, thread %s\n",
 		(unsigned long)code, (unsigned long)context->pc, (unsigned long)context->pr,
 		(unsigned long)*(volatile uint32_t *)0xff00000c, (unsigned long)context->r[15],
@@ -203,6 +367,8 @@ int naomi_boot(void)
 	printf("NAOMI: OutRunners, KOS_SUBARCH=naomi\n");
 	main_thread = thd_get_current();
 	irq_set_handler(EXC_UNHANDLED_EXC, on_exception, NULL);
+	irq_set_handler(EXC_DATA_ADDRESS_READ, on_exception, NULL);
+	irq_set_handler(EXC_DATA_ADDRESS_WRITE, on_exception, NULL);
 	irq_set_handler(EXC_DOUBLE_FAULT, on_exception, NULL);
 	orunners_naomi_live.log_lines = (uint32_t)(uintptr_t)lines;
 	orunners_naomi_live.log_count = LOG_LINES;

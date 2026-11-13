@@ -64,6 +64,7 @@ add_library(s32runtime STATIC
 	runtime/src/memory_census.c
 	runtime/src/tasks.c
 	runtime/src/video.c
+	runtime/src/video_scene_soft.c
 	runtime/src/workers.c
 	runtime/src/multipcm.c
 	runtime/src/sound_chips.c

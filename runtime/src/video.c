@@ -151,6 +151,13 @@ static struct video_state video;
 
 static const uint16_t transparent_row[WIDTH] = { 0 };
 
+#ifdef ORUNNERS_VIDEO_SCENE
+/* (video_scene.c, at the end) */
+static void scene_sprites(bool erase, bool draw);
+static bool scene_only(void);
+static void scene_after_draw(void);
+#endif
+
 /* A sprite pixel's marks (the extra palette's plane) */
 #define EXTRA_COLOURS 1    /* its colour from the extra palette, where one is set */
 #define EXTRA_GHOST   2    /* half its colour, half the colour under it */
@@ -1167,6 +1174,11 @@ static void draw_sprites(int number)
 
 void s32_video_sprites(bool erase, bool draw)
 {
+#ifdef ORUNNERS_VIDEO_SCENE
+	scene_sprites(erase, draw);
+	if (scene_only())
+		return;
+#endif
 	if (erase)
 		for (int screen = 0; screen < S32_SCREENS; screen++)
 		{
@@ -1563,6 +1575,9 @@ void s32_video_draw_frame(void)
 			drawn = draw_layers(wanted);
 		mix(screen, drawn);
 	}
+#ifdef ORUNNERS_VIDEO_SCENE
+	scene_after_draw();
+#endif
 }
 
 void s32_video_show_screens(int screens)
@@ -1671,3 +1686,7 @@ uint64_t s32_video_frame_hash(void)
 					hash = (hash ^ ((video.frame[screen][y][x] >> shift) & 0xff)) * 0x100000001b3ull;
 	return hash;
 }
+
+#ifdef ORUNNERS_VIDEO_SCENE
+#include "video_scene.c"
+#endif

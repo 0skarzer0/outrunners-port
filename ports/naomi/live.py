@@ -20,7 +20,8 @@ sys.path.append('/sbin/piforce/dm_netboot')
 from netdimm import NetDimm, PeekPokeTypeEnum as T
 
 FIELDS = ('magic version seconds game_frames drawn_frames game_us sound_us video_us worst_frame_us frames_total '
-          'dimm_requests log_lines log_count log_width log_next heap_left draw_every inputs').split()
+          'dimm_requests log_lines log_count log_width log_next heap_left draw_every inputs profile_pcs profile_count '
+          'profile_size quads texels_drawn missing video_memory_free textures build_us wait_us submit_us').split()
 
 
 def main():
@@ -53,11 +54,14 @@ def main():
             if live['seconds'] != last:
                 last = live['seconds']
                 i = live['inputs']
-                print('%5ds  game %2d fps  drawn %2d  game %6d us  sound %6d us  video %7d us  worst %7d us  '
-                      'wheel %02x gas %02x brake %02x E %02x  heap %d KB' % (
+                print('%5ds  game %2d fps  drawn %2d  game %5d us  sound %5d us  video %5d us (build %d wait %d submit %d)  worst %6d us  '
+                      'quads %3d  texels %6d/s  missing %04x  textures %d (%d failed)  vram %d KB  '
+                      'wheel %02x gas %02x brake %02x E %02x' % (
                           live['seconds'], live['game_frames'], live['drawn_frames'], live['game_us'],
-                          live['sound_us'], live['video_us'], live['worst_frame_us'], i & 255, i >> 8 & 255,
-                          i >> 16 & 255, i >> 24, live['heap_left'] // 1024), flush=True)
+                          live['sound_us'], live['video_us'], live['build_us'], live['wait_us'], live['submit_us'],
+                          live['worst_frame_us'], live['quads'],
+                          live['texels_drawn'], live['missing'], live['textures'] & 0xffff, live['textures'] >> 16,
+                          live['video_memory_free'] // 1024, i & 255, i >> 8 & 255, i >> 16 & 255, i >> 24), flush=True)
             time.sleep(0.25)
 
 
