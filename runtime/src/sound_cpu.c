@@ -35,13 +35,26 @@
 /* the board's time when the Z80 has run 'cycles' */
 static uint64_t board_time(uint64_t cycles)
 {
+#if defined(ORUNNERS_NAOMI) && S32_CPU_CLOCK == 20000000u && S32_SOUND_CLOCK == 8000000u
+	return cycles * 5 >> 1;    /* (the same, without the SH-4's slow 64-bit division) */
+#else
 	return cycles * S32_CPU_CLOCK / S32_SOUND_CLOCK;
+#endif
 }
 
 /* the first Z80 cycle at or after the board's 'time' */
 static uint64_t z80_time(uint64_t time)
 {
+#if defined(ORUNNERS_NAOMI) && S32_CPU_CLOCK == 20000000u && S32_SOUND_CLOCK == 8000000u
+	/* (time * 2 + 4) / 5 with 32-bit divisions (sound_chips.c's divide) */
+	const uint64_t x = time * 2 + 4;
+	const uint32_t high = (uint32_t)(x >> 32), low = (uint32_t)x;
+	const uint32_t middle = (high % 5) << 16 | low >> 16, bottom = (middle % 5) << 16 | (low & 0xffffu);
+
+	return (uint64_t)(high / 5) << 32 | (uint64_t)(middle / 5) << 16 | bottom / 5;
+#else
 	return (time * S32_SOUND_CLOCK + S32_CPU_CLOCK - 1) / S32_CPU_CLOCK;
+#endif
 }
 
 /* the sound program's ways in (sound_symbols.txt) */

@@ -187,6 +187,15 @@ void host_task_switch(host_task *to)
    and macl are kept too. r15 is the stack pointer. Measured on Linux (2026-11-13): two tasks, about 3.5 KB of
    stack each, so the NAOMI build sets TASK_STACK_SIZE far below the 16 MB of the computers' builds */
 #define SAVED_WORDS 14    /* fr12-fr15, macl, mach, r8-r14, pr: from the top of the stack down */
+#ifndef TASK_COUNT_MAX
+#define TASK_COUNT_MAX 4    /* (two on Linux, 2026-11-13) */
+#endif
+#define HOST_THREAD_STACK (256u << 10)
+
+/* The game's thread's stack, the tasks' stacks at its bottom (s32/tasks.h's host_task_area) */
+uint8_t host_task_area[TASK_COUNT_MAX * TASK_STACK_SIZE + HOST_THREAD_STACK] __attribute__((aligned(32)));
+const size_t host_task_area_size = sizeof(host_task_area);
+static int tasks_made;
 
 void host_switch_stacks(void **from_stack, void *to_stack) __asm__("host_switch_stacks_sh4");
 
@@ -257,8 +266,11 @@ host_task *host_task_create(void (*start)(void))
 	host_task *task = calloc(1, sizeof(*task));
 	uint32_t *registers;
 
-	if (task)
-		task->stack = malloc(TASK_STACK_SIZE);
+	/* (KallistiOS stops a thread whose stack pointer is below its stack's base, "Thread stack underrun", at its
+	   next switch: so the tasks' stacks are carved from host_task_area, the stack the NAOMI port gives the
+	   thread that runs the game, from its bottom up, while that thread's own stack grows down from its top) */
+	if (task && tasks_made < TASK_COUNT_MAX)
+		task->stack = host_task_area + (size_t)tasks_made++ * TASK_STACK_SIZE;
 	if (!task || !task->stack)
 	{
 		fprintf(stderr, "A task could not be created\n");

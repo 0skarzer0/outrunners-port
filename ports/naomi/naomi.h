@@ -33,22 +33,32 @@ typedef struct
 	uint32_t log_width;        /* +0x34 */
 	uint32_t log_next;         /* +0x38 address of the number of lines written so far */
 	uint32_t heap_left;        /* +0x3c bytes above the heap's top after loading */
-	uint32_t draw_every;       /* +0x40 a frame drawn every this many (pokeable: 1-60) */
+	uint32_t draw_every;       /* +0x40 a frame drawn every this many (pokeable: 1-600) */
 	uint32_t inputs;           /* +0x44 wheel | gas << 8 | brake << 16 | port E bits << 24, as the game reads them */
+	uint32_t profile_pcs;      /* +0x48 address of PROFILE_SAMPLES words: the game thread's pc, sampled every ms */
+	uint32_t profile_count;    /* +0x4c samples taken so far (the ring's next index is this modulo its size) */
+	uint32_t profile_size;     /* +0x50 the ring's size in words */
 } orunners_naomi_live_t;
 extern volatile orunners_naomi_live_t orunners_naomi_live;
 
 /* main(), first: the console into the ring, the archive in the NetDIMM mounted on /dimm, the watchdog */
 int naomi_boot(void);
 
+/* The thread whose pc and pr the watchdog prints (the game's) */
+#include <kos/thread.h>
+void naomi_watch_thread(kthread_t *thread);
+
 /* The kept console lines on the screen, for good */
 void naomi_show_log(const char *why) __attribute__((noreturn));
+/* (also on an exception nothing handles: the code, pc, pr and faulting address first; live version = 0xdeadXXXX) */
 
 /* Main RAM above the heap's top */
 uint32_t naomi_heap_left(void);
 
 /* The thread that answers the NetDIMM's peeks and pokes */
 void naomi_dimmcomms_start(void);
+/* Peeks answered in a loop, without threads (after an exception) */
+void naomi_dimmcomms_forever(void) __attribute__((noreturn));
 
 /* The game's frame counter, for the watchdog */
 extern volatile uint32_t naomi_frames_alive;

@@ -110,7 +110,7 @@ typedef struct sprite_drawing
 	uint16_t table[16];
 } sprite_drawing;
 
-static struct
+struct video_state
 {
 	s32_graphics graphics;
 	uint8_t *image_pens;                    /* s32_video_init's: the tiles' pens taken out of the image */
@@ -133,7 +133,21 @@ static struct
 	int shown_sprites;
 	uint32_t frame[S32_SCREENS][HEIGHT][WIDTH];
 	clip_runs runs;
-} video;
+};
+#ifdef ORUNNERS_VIDEO_ON_HEAP
+/* (the NAOMI's: its 4 MB in the heap, not in .bss, ports/naomi/README.md; s32_video_allocate first) */
+static struct video_state *video_heap;
+#define video (*video_heap)
+
+bool s32_video_allocate(void)
+{
+	if (!video_heap)
+		video_heap = calloc(1, sizeof(*video_heap));
+	return video_heap != NULL;
+}
+#else
+static struct video_state video;
+#endif
 
 static const uint16_t transparent_row[WIDTH] = { 0 };
 
@@ -1157,6 +1171,12 @@ void s32_video_sprites(bool erase, bool draw)
 		for (int screen = 0; screen < S32_SCREENS; screen++)
 		{
 			uint16_t *shown = &video.sprites[screen][video.shown_sprites][0][0];
+
+#ifdef ORUNNERS_NAOMI
+			/* (a screen not shown is not drawn into either: 220 KB of writes a frame less on the SH-4) */
+			if (!bit((uint32_t)video.screens_shown, screen))
+				continue;
+#endif
 
 			for (size_t index = 0; index < (size_t)HEIGHT * WIDTH; index++)
 				shown[index] = 0xffff;

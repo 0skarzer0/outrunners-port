@@ -18,8 +18,8 @@ OBJS = main.o naomi_log.o naomi_dimmfs.o naomi_dimmcomms.o workers_none.o \
 # the game's C reads the work RAM through typed lvalues (game/support.h): no strict aliasing anywhere.
 # ORUNNERS_PACKED_PENS: the tiles two pens to a byte (naomi_assets.py). Two tasks of about 3.5 KB of stack each
 # on Linux: 128 KB each is plenty (runtime/src/tasks.c)
-OUR_CFLAGS = -O2 -fno-strict-aliasing -Wno-stringop-overflow -DORUNNERS_PACKED_PENS -DTASK_STACK_SIZE='(128u << 10)' \
-	-I$(ROOT)/runtime/include -I$(ROOT)/src -I.
+OUR_CFLAGS = -O2 -fno-strict-aliasing -Wno-stringop-overflow -DORUNNERS_NAOMI -DORUNNERS_NO_FM_SYNTHESIS -DORUNNERS_PACKED_PENS -DORUNNERS_VIDEO_ON_HEAP -DTASK_STACK_SIZE='(128u << 10)' \
+	-I$(ROOT)/runtime/include -I$(ROOT)/src -I. $(EXTRA)
 
 all: $(TARGET)
 

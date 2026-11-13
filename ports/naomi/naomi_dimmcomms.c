@@ -102,6 +102,14 @@ static void *service(void *unused) {
     return NULL;
 }
 
+/* After an exception, with no threads: answer peeks for good, so that the console ring can still be read */
+void naomi_dimmcomms_forever(void) {
+    for (;;) {
+        dimm_service();
+        for (volatile int i = 0; i < 20000; i++) { }
+    }
+}
+
 void naomi_dimmcomms_start(void) {
     const kthread_attr_t attributes = {.create_detached = true, .stack_size = 4096, .label = "naomi dimm",
                                        .prio = PRIO_DEFAULT - 1};

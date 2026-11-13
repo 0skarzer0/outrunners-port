@@ -33,6 +33,14 @@ void host_task_switch(host_task *to);
 
 host_task *host_task_current(void);
 
+#if defined(__SH4__) || defined(__sh__)
+#include <stddef.h>
+#include <stdint.h>
+/* The SH-4's (KallistiOS): the stack to give the thread that runs the game, which holds the tasks' stacks too */
+extern uint8_t host_task_area[];
+extern const size_t host_task_area_size;
+#endif
+
 #ifdef __cplusplus
 }
 #endif

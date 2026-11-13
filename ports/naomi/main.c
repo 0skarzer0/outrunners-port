@@ -27,6 +27,7 @@
 #include "s32/video.h"
 #include "sound/chips.h"
 #include "game/assets.h"
+#include "host/tasks.h"
 
 #include "naomi.h"
 #include "naomi_dimmfs.h"
@@ -36,6 +37,11 @@
 #include <string.h>
 
 KOS_INIT_FLAGS(INIT_DEFAULT);
+
+#ifdef ORUNNERS_NAOMI_STAGE
+/* test builds: where main() stops, a variable so that everything after it is linked all the same (pokeable) */
+static volatile int naomi_stop_at = ORUNNERS_NAOMI_STAGE;
+#endif
 
 #define ASSETS_FILE     "/dimm/orunners_naomi.assets"
 
@@ -210,7 +216,7 @@ static void choose_drawing(void)
 	static uint32_t count;
 	uint32_t every = orunners_naomi_live.draw_every;
 
-	if (every < 1 || every > 60)
+	if (every < 1 || every > 600)
 		every = 4;
 	count++;
 	drawing = count % every == 0;
@@ -259,6 +265,9 @@ static void on_frame_done(void)
 	}
 	naomi_frames_alive++;
 	orunners_naomi_live.frames_total++;
+	if (orunners_naomi_live.frames_total <= 600 && orunners_naomi_live.frames_total % 30 == 1)
+		printf("NAOMI: frame %lu: %lu us (sound %lu, video %lu)\n", (unsigned long)orunners_naomi_live.frames_total,
+			(unsigned long)(now - frame_started), (unsigned long)sound_time, (unsigned long)video_time);
 	video_time = sound_time = 0;
 	choose_drawing();
 
@@ -277,7 +286,11 @@ static void on_log(const char *message)
 	printf("board: %s\n", message);
 }
 
-/* ---- the assets: the NAOMI's pack from the NetDIMM into main RAM ---- */
+/* ---- the assets: the NAOMI's pack from the NetDIMM into main RAM ----
+
+   (Found on the board, 2026-11-13: an image whose program and .bss end beyond about 0x8c530000 never reaches
+   main(), while the same addresses taken from the heap later are fine; so video.c's 4 MB of state comes from the
+   heap here, ORUNNERS_VIDEO_ON_HEAP) */
 
 static void load_assets(void)
 {
@@ -293,8 +306,18 @@ static void load_assets(void)
 		(unsigned long)naomi_heap_left());
 	if (!(bytes = malloc((size_t)size)))
 		naomi_show_log("NO ROOM FOR THE ASSETS");
-	if (fread(bytes, 1, (size_t)size, input) != (size_t)size)
-		naomi_show_log("THE ASSETS CANNOT BE READ");
+	/* in pieces: the NetDIMM's peeks share the cartridge port and wait for each piece (naomi_dimmcomms.c) */
+	for (long done = 0; done < size;)
+	{
+		const size_t piece = size - done > (256 << 10) ? (256 << 10) : (size_t)(size - done);
+
+		if (fread(bytes + done, 1, piece, input) != piece)
+			naomi_show_log("THE ASSETS CANNOT BE READ");
+		done += (long)piece;
+		if ((done & ((4 << 20) - 1)) < (256 << 10) || done == size)
+			printf("NAOMI: %ld of %ld bytes read, %lu ms\n", done, size,
+				(unsigned long)(timer_ms_gettime64() - start));
+	}
 	fclose(input);
 	printf("NAOMI: assets read in %lu ms\n", (unsigned long)(timer_ms_gettime64() - start));
 	if ((problem = assets_load_pack_bytes(bytes, (size_t)size)) != NULL)
@@ -304,23 +327,67 @@ static void load_assets(void)
 	}
 }
 
+/* The game runs in a thread of its own whose stack holds the tasks' stacks too (runtime/src/tasks.c): KallistiOS
+   stops a thread whose stack pointer goes below its stack's base, and the main thread's is at the top of RAM */
+static void *game_thread(void *unused)
+{
+	(void)unused;
+	program_run();
+	return NULL;
+}
+
+static void run_game_thread(void)
+{
+	const kthread_attr_t attributes = { .stack_size = host_task_area_size, .stack_ptr = host_task_area,
+		.label = "outrunners" };
+	kthread_t *thread = thd_create_ex(&attributes, game_thread, NULL);
+
+	if (!thread)
+		naomi_show_log("NO THREAD FOR THE GAME");
+	naomi_watch_thread(thread);
+	thd_join(thread, NULL);
+}
+
 int main(int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
 	naomi_boot();
+	naomi_dimmcomms_start();    /* (first: the console can be read through the NetDIMM while the assets load) */
+#if defined(ORUNNERS_NAOMI_STAGE)
+	if (naomi_stop_at == 0)    /* does KallistiOS run, and do the peeks answer? */
+		for (;;)
+		{
+			thd_sleep(1000);
+			naomi_frames_alive++;
+			orunners_naomi_live.frames_total++;
+			printf("NAOMI: stage 0 alive, %lu s, heap left %lu\n", (unsigned long)orunners_naomi_live.frames_total,
+				(unsigned long)naomi_heap_left());
+		}
+#endif
 	vid_set_mode(DM_640x480, PM_RGB565);
 	vid_clear(0, 0, 0);
 	load_assets();
 	orunners_naomi_live.heap_left = naomi_heap_left();
 	printf("NAOMI: %lu bytes of RAM left\n", (unsigned long)orunners_naomi_live.heap_left);
-	naomi_dimmcomms_start();
+#if defined(ORUNNERS_NAOMI_STAGE)
+	if (naomi_stop_at == 1)
+	for (;;)
+	{
+		thd_sleep(1000);
+		naomi_frames_alive++;
+		orunners_naomi_live.frames_total++;
+	}
+#endif
 
+	if (!s32_video_allocate())
+		naomi_show_log("NO ROOM FOR THE VIDEO");
 	s32_board.irq_changed = on_irq_changed;
 	s32_board.controls_update = on_controls_update;
 	s32_board.log = on_log;
 	s32_board.frame_timing = true;
 	s32_board.program_at = data_byte_at;
+	printf("NAOMI: %s\n", "s32_init(NULL);");
 	s32_init(NULL);
 	s32_video_init_graphics(assets_graphics());
 	choose_drawing();    /* (one screen at most, the cabinet's: s32_video_show_screens) */
@@ -328,12 +395,26 @@ int main(int argc, char **argv)
 	s32_board.sound_at = assets_sound_data;
 	s32_board.sound_byte_at = assets_sound_byte;
 	s32_board.pcm_at = assets_pcm_byte;
+	printf("NAOMI: %s\n", "sound_chips_attach();");
 	sound_chips_attach();
 	sound_cpu_attach();
+	printf("NAOMI: %s\n", "program_reset();");
 	program_reset();
 	program_frame_done = on_frame_done;
 	frame_started = timer_us_gettime64();
 	printf("NAOMI: the game starts\n");
-	program_run();
+#if defined(ORUNNERS_NAOMI_STAGE)
+	if (naomi_stop_at == 2)    /* waits here until poked to anything else (live.py's ADDR of naomi_stop_at) */
+	{
+		printf("NAOMI: stage 2, waiting for a poke at %p\n", (void *)&naomi_stop_at);
+		while (naomi_stop_at == 2)
+		{
+			thd_sleep(100);
+			naomi_frames_alive++;
+		}
+		printf("NAOMI: poked, the game runs\n");
+	}
+#endif
+	run_game_thread();
 	naomi_show_log("THE GAME STOPPED");
 }

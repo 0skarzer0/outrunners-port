@@ -61,6 +61,22 @@ static struct
 
 static bool sides_together;    /* sound_chips_join_sides */
 
+/* x / d rounded down for d below 65536, with 32-bit divisions only: the SH-4 has no 64-bit division, and libgcc's
+   takes a good part of a frame when called for every sound event (ORUNNERS_NAOMI; exact, the same results) */
+static inline uint64_t divide(uint64_t x, uint32_t d)
+{
+#ifdef ORUNNERS_NAOMI
+	const uint32_t high = (uint32_t)(x >> 32), low = (uint32_t)x;
+	const uint32_t q_high = high / d, r_high = high % d;
+	const uint32_t middle = r_high << 16 | low >> 16, q_middle = middle / d, r_middle = middle % d;
+	const uint32_t bottom = r_middle << 16 | (low & 0xffffu), q_bottom = bottom / d;
+
+	return (uint64_t)q_high << 32 | (uint64_t)q_middle << 16 | q_bottom;
+#else
+	return x / d;
+#endif
+}
+
 static uint64_t now(void)
 {
 	return sound.override != NO_TIMER ? sound.override : s32_board.sound_cycles;
@@ -69,7 +85,7 @@ static uint64_t now(void)
 /* board cycles 'clocks' of the YM3438 (which runs on the Z80's clock) take, rounded up */
 static uint64_t fm_span(uint64_t clocks)
 {
-	return (clocks * S32_CPU_CLOCK + S32_SOUND_CLOCK - 1) / S32_SOUND_CLOCK;
+	return divide(clocks * (S32_CPU_CLOCK / 1000000u) + S32_SOUND_CLOCK / 1000000u - 1, S32_SOUND_CLOCK / 1000000u);
 }
 
 static void append(sample_buffer *buffer, int32_t first, int32_t second)
@@ -87,12 +103,17 @@ static void append(sample_buffer *buffer, int32_t first, int32_t second)
 
 static void fm_catch_up(uint64_t time)
 {
-	const uint64_t due = (time + FM_PERIOD - 1) / FM_PERIOD;
+	const uint64_t due = divide(time + FM_PERIOD - 1, (uint32_t)FM_PERIOD);
 	int32_t out[2];
 
 	while (sound.fm_samples < due)
 	{
+#ifdef ORUNNERS_NO_FM_SYNTHESIS
+		/* (OutRunners plays no FM note, ym3438.c says: the chip's timers are all it uses) */
+		out[0] = out[1] = 0;
+#else
 		s32_fm_generate(&sound.fm, out);
+#endif
 		append(&sound.fm_buffer, out[0], out[1]);
 		sound.fm_samples++;
 	}
@@ -161,7 +182,7 @@ static void fm_write(int offset, uint8_t data)
 
 static void pcm_catch_up(uint64_t time)
 {
-	const uint64_t due = (time + PCM_PERIOD - 1) / PCM_PERIOD;
+	const uint64_t due = divide(time + PCM_PERIOD - 1, (uint32_t)PCM_PERIOD);
 	int32_t first[256];
 	int32_t second[256];
 
@@ -207,6 +228,11 @@ static uint64_t hash_bytes(const void *data, size_t size, uint64_t hash)
 /* 32-bit samples hashed by their bytes low first, as the PC holds them, on a processor of either order */
 static uint64_t hash_samples(const int32_t *samples, size_t count, uint64_t hash)
 {
+#ifdef ORUNNERS_NAOMI
+	(void)samples;
+	(void)count;
+	return hash;    /* (the tests' hashes: not on the board) */
+#endif
 	for (size_t index = 0; index < count; index++)
 		for (int shift = 0; shift < 32; shift += 8)
 			hash = (hash ^ (uint8_t)((uint32_t)samples[index] >> shift)) * 0x100000001b3ull;
@@ -285,8 +311,8 @@ void sound_chips_end_frame(uint64_t time)
 
 	fm_catch_up(time);
 	pcm_catch_up(time);
-	hash = take(&sound.fm_buffer, (time + FM_PERIOD - 1) / FM_PERIOD, hash, 0);
-	sound.frame_hash = take(&sound.pcm_buffer, (time + PCM_PERIOD - 1) / PCM_PERIOD, hash, 1);
+	hash = take(&sound.fm_buffer, divide(time + FM_PERIOD - 1, (uint32_t)FM_PERIOD), hash, 0);
+	sound.frame_hash = take(&sound.pcm_buffer, divide(time + PCM_PERIOD - 1, (uint32_t)PCM_PERIOD), hash, 1);
 	mix();
 }
 

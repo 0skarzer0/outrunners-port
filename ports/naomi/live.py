@@ -9,7 +9,7 @@ After live.py of Daytona USA's native port on the NAOMI (0skarzer0/daytona-arcad
   fps [N]   one line a second for N seconds (default 30): the game's frames, the frames drawn, and the time of
             the game's C, of the sound board and of video.c (microseconds)
   log       the console's ring
-  draw N    draw a frame every N (1-60): video.c's cost against the game's speed
+  draw N    draw a frame every N (1-600): video.c's cost against the game's speed
 
 Example: python3 live.py 10.0.0.4 0x8c2a1b40 fps 60
 """

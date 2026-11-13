@@ -125,6 +125,11 @@ extern s32_tile_observer s32_video_tile_observer;
    screen, with its mixer's registers as they are now, without blending or color offsets */
 uint16_t s32_video_tile_pen_color(int screen, int tilemap, uint16_t color, int pen);
 
+#ifdef ORUNNERS_VIDEO_ON_HEAP
+/* The video's state from the heap (built with ORUNNERS_VIDEO_ON_HEAP): before anything else of the video */
+bool s32_video_allocate(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

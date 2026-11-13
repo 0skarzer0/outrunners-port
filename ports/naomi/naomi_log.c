@@ -89,7 +89,7 @@ static dbgio_handler_t ring = {
 	.read_buffer = ring_read_buffer,
 };
 
-void naomi_show_log(const char *why)
+static void __attribute__((noreturn)) show_log(const char *why, int in_exception)
 {
 	static char copy[LOG_LINES][LOG_WIDTH];
 	unsigned count, pick[SHOW_LINES], n = 0;
@@ -112,7 +112,29 @@ void naomi_show_log(const char *why)
 		printf(" %s\n", line);
 	}
 	for (;;)
-		thd_sleep(1000);
+		if (in_exception)
+			continue;
+		else
+			thd_sleep(1000);
+}
+
+void naomi_show_log(const char *why)
+{
+	show_log(why, 0);
+}
+
+/* An exception nothing handles (an address error, an illegal instruction...): where it was, then the console on
+   the screen. Without this KallistiOS prints the registers and stops, and a cabinet shows black */
+static void on_exception(irq_t code, irq_context_t *context, void *data)
+{
+	(void)data;
+	printf("NAOMI EXCEPTION %03lx at pc %08lx pr %08lx, address %08lx, r15 %08lx, thread %s\n",
+		(unsigned long)code, (unsigned long)context->pc, (unsigned long)context->pr,
+		(unsigned long)*(volatile uint32_t *)0xff00000c, (unsigned long)context->r[15],
+		thd_get_current() ? thd_get_current()->label : "?");
+	orunners_naomi_live.version = 0xdead0000u | (uint32_t)code;
+	/* (no screen from here: vid_init waits for interrupts that an exception has off; the peeks instead) */
+	naomi_dimmcomms_forever();
 }
 
 static void *watchdog(void *unused)
@@ -134,7 +156,7 @@ static void *watchdog(void *unused)
 		}
 		if (++still >= (seen ? HANG_S : HANG_FIRST_S))
 		{
-			printf("NAOMI HANG: no game frame for %u s (%lu run), main thread pc %08lx pr %08lx\n", still,
+			printf("NAOMI HANG: no game frame for %u s (%lu run), game thread pc %08lx pr %08lx\n", still,
 				(unsigned long)last, main_thread ? (unsigned long)main_thread->context.pc : 0ul,
 				main_thread ? (unsigned long)main_thread->context.pr : 0ul);
 			naomi_show_log("HANG");
@@ -143,9 +165,35 @@ static void *watchdog(void *unused)
 	return NULL;
 }
 
+void naomi_watch_thread(kthread_t *thread)
+{
+	main_thread = thread;
+}
+
+/* A sampling profiler: every millisecond, where the game's thread was when it was interrupted (its saved pc),
+   into a ring the Raspberry reads (profile.py) and sh-elf-addr2line names */
+#define PROFILE_SAMPLES 4096
+static uint32_t profile_pcs[PROFILE_SAMPLES];
+
+static void *profiler(void *unused)
+{
+	(void)unused;
+	for (;;)
+	{
+		thd_sleep(1);
+		if (main_thread && main_thread != thd_get_current())
+		{
+			profile_pcs[orunners_naomi_live.profile_count % PROFILE_SAMPLES] = main_thread->context.pc;
+			orunners_naomi_live.profile_count++;
+		}
+	}
+	return NULL;
+}
+
 int naomi_boot(void)
 {
-	const kthread_attr_t attributes = { .create_detached = true, .stack_size = 4096, .label = "naomi watchdog" };
+	const kthread_attr_t attributes = { .create_detached = true, .stack_size = 8192, .prio = PRIO_DEFAULT - 2,
+		.label = "naomi watchdog" };    /* (above the game's thread, which never waits) */
 	int files;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -154,6 +202,8 @@ int naomi_boot(void)
 		dbgio_dev_select("naomi-ring");
 	printf("NAOMI: OutRunners, KOS_SUBARCH=naomi\n");
 	main_thread = thd_get_current();
+	irq_set_handler(EXC_UNHANDLED_EXC, on_exception, NULL);
+	irq_set_handler(EXC_DOUBLE_FAULT, on_exception, NULL);
 	orunners_naomi_live.log_lines = (uint32_t)(uintptr_t)lines;
 	orunners_naomi_live.log_count = LOG_LINES;
 	orunners_naomi_live.log_width = LOG_WIDTH;
@@ -164,5 +214,14 @@ int naomi_boot(void)
 		naomi_show_log("NO ASSETS IN THE NETDIMM IMAGE (ports/naomi/build_naomi.sh)");
 	if (!thd_create_ex(&attributes, watchdog, NULL))
 		printf("NAOMI: no watchdog\n");
+	{
+		const kthread_attr_t profiling = { .create_detached = true, .stack_size = 4096, .prio = PRIO_DEFAULT - 3,
+			.label = "naomi profiler" };
+
+		orunners_naomi_live.profile_pcs = (uint32_t)(uintptr_t)profile_pcs;
+		orunners_naomi_live.profile_size = PROFILE_SAMPLES;
+		if (!thd_create_ex(&profiling, profiler, NULL))
+			printf("NAOMI: no profiler\n");
+	}
 	return 0;
 }
