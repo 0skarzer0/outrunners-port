@@ -26,6 +26,7 @@
 #define SCENE_SPRITES      512
 #define SCENE_PAGES        16        /* page images kept: 4 for NBG0 and 4 for NBG2 at most, and the text map */
 #define SCENE_SPRITE_SLOTS 2048      /* sprite images known (a power of two) */
+#define SCENE_SPRITE_PROBES 16       /* slots a sprite may sit in from its hash: the least recently used one is reused */
 #define BANKS              (S32_PALETTE_ENTRIES / 16)
 
 /* A sprite of the list as the board drew it */
@@ -308,13 +309,20 @@ static s32_scene_quad *new_quad(const scene_layer *layer, int image)
 
 static scene_slot *oldest_sprite_image(const scene_slot *keep)
 {
+	/* A clock hand: the next image not used for a few frames, so freeing room costs a short walk, not a search of
+	 * every slot for every image (the NAOMI's video memory fills in a minute of play and stays full) */
+	static uint32_t hand;
 	scene_slot *oldest = NULL;
 
-	for (int index = 0; index < SCENE_SPRITE_SLOTS; index++)
+	for (int step = 0; step < SCENE_SPRITE_SLOTS; step++)
 	{
-		scene_slot *at = &scene.slots[index];
+		scene_slot *at = &scene.slots[hand++ & (SCENE_SPRITE_SLOTS - 1)];
 
-		if (at->image && at != keep && at->used != scene.frame && (!oldest || at->used < oldest->used))
+		if (!at->image || at == keep || at->used == scene.frame)
+			continue;
+		if (scene.frame - at->used > 8)
+			return at;
+		if (!oldest || at->used < oldest->used)
 			oldest = at;
 	}
 	return oldest;
@@ -329,6 +337,26 @@ static int image_with_room(int width, int height, const scene_slot *keep)
 	{
 		scene_slot *oldest = oldest_sprite_image(keep);
 
+		/* No sprite image left unused for a while: a tilemap page not drawn this frame goes first (16 pages are
+		 * 4 MB, most of the NAOMI's video memory; old ones stayed and starved the sprites: the car vanished) */
+		if (!oldest || scene.frame - oldest->used <= 8)
+		{
+			scene_page *page = NULL;
+
+			for (int index = 0; index < SCENE_PAGES; index++)
+			{
+				scene_page *entry = &scene.pages[index];
+
+				if (entry->image && entry->used != scene.frame && (!page || entry->used < page->used))
+					page = entry;
+			}
+			if (page)
+			{
+				scene.backend->image_free(scene.backend->context, page->image);
+				page->image = 0;
+				continue;
+			}
+		}
 		if (!oldest)
 		{
 			scene.missing |= S32_SCENE_MISSING_IMAGES;
@@ -1258,7 +1286,7 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 	if (!hash)
 		hash = 1;
 	key.hash = hash;
-	for (uint32_t probe = 0; probe < SCENE_SPRITE_SLOTS; probe++)
+	for (uint32_t probe = 0; probe < SCENE_SPRITE_PROBES; probe++)
 	{
 		scene_slot *at = &scene.slots[(hash + probe) & (SCENE_SPRITE_SLOTS - 1)];
 
@@ -1280,11 +1308,18 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 		return slot;
 	}
 	if (!slot)
-		for (uint32_t probe = 0; probe < SCENE_SPRITE_SLOTS && !slot; probe++)
+		/* an empty slot in the window, or else the one used longest ago (not this frame): a key is never removed,
+		 * only replaced in place, so the windows of the others stay whole and the table never fills up */
+		for (uint32_t probe = 0; probe < SCENE_SPRITE_PROBES; probe++)
 		{
 			scene_slot *at = &scene.slots[(hash + probe) & (SCENE_SPRITE_SLOTS - 1)];
 
 			if (at->hash == 0)
+			{
+				slot = at;
+				break;
+			}
+			if (at->used != scene.frame && (!slot || at->used < slot->used))
 				slot = at;
 		}
 	if (!slot)

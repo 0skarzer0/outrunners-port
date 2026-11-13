@@ -114,6 +114,33 @@ Imagen `or_213421.bin.gz` (md5 `53940196ce7cdb338ca2e5d04ee0c33c`, rama `naomi` 
 - `misaligned` 101 (resueltos por el kit, sin cuelgue).
 - Falta lo que solo ve quien está delante: sonido, sombras, fundidos, START = moneda.
 
+## Auditoría en placa: lentitud y coche que desaparece (2026-11-13, 22:00-22:30)
+
+Medido con `live.py ADDR watch 150` mientras el usuario jugaba (trazas en la Pi: `/tmp/or_trace*.txt`).
+
+1. **El coche desaparecía**: `missing` = `0x200` (S32_SCENE_MISSING_IMAGES) fijo tras unos minutos. Las 16 páginas de
+   tilemap (512 x 256, 256 KB cada una, 4 MB) nunca se soltaban aunque no se dibujaran, y dejaban sin sitio a los
+   sprites. Arreglo (`runtime/src/video_scene.c`, `image_with_room`): si no hay sprite viejo (más de 8 fotogramas sin
+   usar), se suelta antes una página no usada en este fotograma. Además la tabla de sprites (2048 entradas) se llenaba
+   y cada búsqueda la recorría entera: ahora cada sprite tiene una ventana de 16 entradas y se reutiliza la usada hace
+   más tiempo; y la búsqueda de víctima es una «manecilla de reloj», no un recorrido de las 2048 por imagen.
+   Comprobado en el headless (`ORUNNERS_SCENE_TEXELS=2000000`, presupuesto como en la placa): de 276 de 300 muestras con
+   `missing 0200` y 55 % de píxeles distintos a 0 y 0,675 % (lo mismo que sin presión). En placa: `missing 0` siempre.
+2. **Lento (30 fps)**: `build_us` 20-35 ms con `texels_drawn` ~2 millones por segundo, y `failed` subiendo con 2-3 MB
+   libres: la memoria de vídeo de KallistiOS (`pvr_mem`, un malloc general) se fragmentaba. Arreglo
+   (`ports/naomi/pvr_video.c`): un allocator buddy sobre arenas de 1 MB (12 en la NAOMI: 14 MB libres al arrancar);
+   las listas libres van dentro de los bloques libres en la propia memoria de vídeo. Probado en el PC con 2 millones de
+   operaciones al azar: al liberarlo todo vuelven las arenas enteras. Handles de imagen 2048 -> 4096.
+   En placa: en carrera casi siempre 51-60 fps.
+3. **Lo que queda** (imagen `or_221736.bin.gz`, md5 `471c8c6e8530a6ff3478abb5baa8d20d`):
+   - Picos de 2,5 millones de texeles por segundo (22-30 fps unos segundos) sin falta de memoria: sprites que se
+     redibujan porque su paleta cambia cada fotograma (`sprite_version` sube). Arreglo de fondo: **texturas con paleta**
+     de la PowerVR2 (4 bpp: 64 bancos de 16 colores en su RAM de paleta; 8 bpp: 4 de 256), que cambian de color sin
+     redibujarse; un banco por fotograma para los que se usen, y ARGB1555 de reserva si no caben.
+   - En algunas pantallas fuera de carrera, `wait_us` ~16 ms con `build_us` 5 ms: la PowerVR2 tarda más de un
+     fotograma en pintar (mucha superposición translúcida: fundidos y texto). Mirar qué capas hay ahí.
+   - El campo `textures` del bloque es `imágenes | fallos << 16`, no un contador de texturas (por eso sale enorme).
+
 ## Fase 2 — render PowerVR2
 
 Código: `runtime/src/video_scene.c` (escena de quads, portable, incluida por `video.c` con `ORUNNERS_VIDEO_SCENE`),

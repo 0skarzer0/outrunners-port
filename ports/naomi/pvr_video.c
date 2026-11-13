@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define IMAGES 2048
+#define IMAGES 4096    /* handles: up to 2048 sprite slots with a shadow each, the pages and the bitmap */
 #define TOP    16          /* (480 - 448) / 2 */
 
 static struct
@@ -35,17 +35,142 @@ static struct
 	int images, failed;
 } pvr_images;
 
+/* ---- video memory for the images: a buddy allocator over 1 MB arenas ----
+ * Every image is a power of two in width and height, so in bytes too. KallistiOS's pvr_mem (a general malloc) got
+ * fragmented in a minute of play: with 2-3 MB free, a 128 KB sprite or a 256 KB page found no hole, and the scene
+ * let one sprite image go after another (each one drawn again later: 2 million texels a second, 30 frames/s). A
+ * buddy allocator joins every freed block with its twin, so a run of frees always leaves whole blocks. The free
+ * lists live in the free blocks themselves (two words at their start, in video memory); a byte a 128-byte unit
+ * says what starts there (bit 7 a used block, the low bits its order). */
+#define ARENA_ORDER 20                        /* 1 MB */
+#define UNIT_ORDER  7                         /* 128 bytes: an 8 x 8 image */
+#define ORDERS      (ARENA_ORDER - UNIT_ORDER + 1)
+#define UNITS       (1 << (ARENA_ORDER - UNIT_ORDER))
+#define ARENAS      16
+#define NONE        0xffffffffu
+
+static struct
+{
+	uint8_t *base[ARENAS];                    /* (pvr_ptr_t) */
+	int count;
+	uint32_t head[ARENAS][ORDERS];            /* the first free block of each order, a unit, or NONE */
+	uint8_t tag[ARENAS][UNITS];               /* 0 nothing starts here; 0x40 | order a free block; 0x80 | order a used one */
+	size_t free_bytes;
+} buddy;
+
+static volatile uint32_t *block_words(int arena, uint32_t unit)
+{
+	return (volatile uint32_t *)(buddy.base[arena] + ((size_t)unit << UNIT_ORDER));
+}
+
+static void free_push(int arena, uint32_t unit, int order)
+{
+	volatile uint32_t *words = block_words(arena, unit);
+	const uint32_t head = buddy.head[arena][order - UNIT_ORDER];
+
+	words[0] = head;      /* next */
+	words[1] = NONE;      /* previous */
+	if (head != NONE)
+		block_words(arena, head)[1] = unit;
+	buddy.head[arena][order - UNIT_ORDER] = unit;
+	buddy.tag[arena][unit] = (uint8_t)(0x40 | order);
+}
+
+static void free_remove(int arena, uint32_t unit, int order)
+{
+	volatile uint32_t *words = block_words(arena, unit);
+	const uint32_t next = words[0], previous = words[1];
+
+	if (previous != NONE)
+		block_words(arena, previous)[0] = next;
+	else
+		buddy.head[arena][order - UNIT_ORDER] = next;
+	if (next != NONE)
+		block_words(arena, next)[1] = previous;
+	buddy.tag[arena][unit] = 0;
+}
+
+static void buddy_start(void)
+{
+	memset(buddy.head, 0xff, sizeof(buddy.head));
+	/* as many arenas as fit, leaving KallistiOS 512 KB of its own */
+	while (buddy.count < ARENAS && pvr_mem_available() >= ((size_t)1 << ARENA_ORDER) + (512 << 10))
+	{
+		uint8_t *base = (uint8_t *)pvr_mem_malloc((size_t)1 << ARENA_ORDER);
+
+		if (!base)
+			break;
+		buddy.base[buddy.count] = base;
+		free_push(buddy.count, 0, ARENA_ORDER);
+		buddy.count++;
+		buddy.free_bytes += (size_t)1 << ARENA_ORDER;
+	}
+}
+
+static pvr_ptr_t buddy_alloc(size_t bytes)
+{
+	int order = UNIT_ORDER;
+
+	while (((size_t)1 << order) < bytes)
+		order++;
+	if (order > ARENA_ORDER)
+		return NULL;
+	for (int arena = 0; arena < buddy.count; arena++)
+		for (int k = order; k <= ARENA_ORDER; k++)
+		{
+			const uint32_t unit = buddy.head[arena][k - UNIT_ORDER];
+
+			if (unit == NONE)
+				continue;
+			free_remove(arena, unit, k);
+			while (k > order)
+			{
+				k--;
+				free_push(arena, unit + (1u << (k - UNIT_ORDER)), k);
+			}
+			buddy.tag[arena][unit] = (uint8_t)(0x80 | order);
+			buddy.free_bytes -= (size_t)1 << order;
+			return (pvr_ptr_t)(buddy.base[arena] + ((size_t)unit << UNIT_ORDER));
+		}
+	return NULL;
+}
+
+static void buddy_free(pvr_ptr_t pointer)
+{
+	const uint8_t *at = (const uint8_t *)pointer;
+
+	for (int arena = 0; arena < buddy.count; arena++)
+		if (at >= buddy.base[arena] && at < buddy.base[arena] + ((size_t)1 << ARENA_ORDER))
+		{
+			uint32_t unit = (uint32_t)((size_t)(at - buddy.base[arena]) >> UNIT_ORDER);
+			int order = buddy.tag[arena][unit] & 0x3f;
+
+			buddy.tag[arena][unit] = 0;
+			buddy.free_bytes += (size_t)1 << order;
+			while (order < ARENA_ORDER)
+			{
+				const uint32_t twin = unit ^ (1u << (order - UNIT_ORDER));
+
+				if (buddy.tag[arena][twin] != (uint8_t)(0x40 | order))
+					break;
+				free_remove(arena, twin, order);
+				unit &= ~(1u << (order - UNIT_ORDER));
+				order++;
+			}
+			free_push(arena, unit, order);
+			return;
+		}
+}
+
 static int image_create(void *context, int width, int height)
 {
 	(void)context;
 	for (int image = 1; image < IMAGES; image++)
 		if (!pvr_images.base[image])
 		{
-			pvr_ptr_t base;
+			pvr_ptr_t base = buddy_alloc((size_t)width * (size_t)height * 2);
 
-			/* (leave 64 KB: KallistiOS's own) */
-			if (pvr_mem_available() < (size_t)width * (size_t)height * 2 + (64 << 10)
-				|| !(base = pvr_mem_malloc((size_t)width * (size_t)height * 2)))
+			if (!base)
 			{
 				pvr_images.failed++;
 				return 0;
@@ -64,7 +189,7 @@ static void image_free(void *context, int image)
 	(void)context;
 	if (image > 0 && image < IMAGES && pvr_images.base[image])
 	{
-		pvr_mem_free(pvr_images.base[image]);
+		buddy_free(pvr_images.base[image]);
 		pvr_images.base[image] = NULL;
 		pvr_images.images--;
 	}
@@ -99,7 +224,9 @@ void pvr_video_start(void)
 	pvr_init(&params);
 	pvr_set_bg_color(0, 0, 0);
 	pvr_images.free_at_start = pvr_mem_available();
-	printf("NAOMI: PowerVR2 on, %lu bytes of video memory for textures\n", (unsigned long)pvr_images.free_at_start);
+	buddy_start();
+	printf("NAOMI: PowerVR2 on, %lu bytes of video memory, %d MB of it for the images\n",
+		(unsigned long)pvr_images.free_at_start, buddy.count);
 	s32_scene_start(&backend, true);
 }
 
@@ -163,7 +290,7 @@ void pvr_video_frame(pvr_video_stats *stats)
 		stats->missing = frame->missing;
 		stats->images = pvr_images.images;
 		stats->failed = pvr_images.failed;
-		stats->video_memory_free = (uint32_t)pvr_mem_available();
+		stats->video_memory_free = (uint32_t)buddy.free_bytes;    /* (of the images' arenas) */
 	}
 	pvr_wait_ready();
 	ready = timer_us_gettime64();

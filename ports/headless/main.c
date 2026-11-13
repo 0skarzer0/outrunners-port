@@ -328,7 +328,7 @@ static void scene_compare(void)
 	static int state;    /* 0 not looked at, 1 on, 2 off */
 	static const char *dir;
 	static uint32_t pixels[224 * 320];
-	static uint64_t total_differ, total_pixels;
+	static uint64_t total_differ, total_pixels, total_texels;
 	const uint64_t frame = program_frames() - 1;
 	int width;
 	const uint32_t *board;
@@ -341,7 +341,7 @@ static void scene_compare(void)
 		state = dir ? 1 : 2;
 		if (dir)
 		{
-			s32_scene_start(s32_scene_soft_backend(3l << 20), false);    /* (6 MB of 16-bit texels) */
+			s32_scene_start(s32_scene_soft_backend(getenv("ORUNNERS_SCENE_TEXELS") ? atol(getenv("ORUNNERS_SCENE_TEXELS")) : 3l << 20), false);    /* (6 MB of 16-bit texels; ORUNNERS_SCENE_TEXELS for less, as on the NAOMI) */
 			s32_scene_follow_frames(true);
 		}
 	}
@@ -356,6 +356,7 @@ static void scene_compare(void)
 			differ += (board[(size_t)y * S32_VIDEO_MAX_WIDTH + (size_t)x] & 0xf8f8f8) != pixels[y * 320 + x];
 	total_differ += (uint64_t)differ;
 	total_pixels += 320 * 224;
+	total_texels += (uint64_t)scene->texels_drawn;
 	if (frame % 30 == 0)
 	{
 		int blended = 0, shadows = 0;
@@ -365,9 +366,9 @@ static void scene_compare(void)
 			blended += scene->quads[index].weight < 8 && scene->quads[index].modulate != 0;
 			shadows += scene->quads[index].weight < 8 && scene->quads[index].modulate == 0;
 		}
-		printf("scene %" PRIu64 ": %ld pixels differ (%.2f %%; all %.3f %%), %d quads (%d blend, %d shadow), %d images drawn (%d texels), missing %04x, subtract %06x\n",
+		printf("scene %" PRIu64 ": %ld pixels differ (%.2f %%; all %.3f %%), %d quads (%d blend, %d shadow), %d images drawn (%d texels), missing %04x, subtract %06x, texels so far %" PRIu64 "\n",
 			frame, differ, differ * 100.0 / (320 * 224), total_differ * 100.0 / (double)total_pixels, scene->count, blended, shadows,
-			scene->images_drawn, scene->texels_drawn, scene->missing, (unsigned)scene->subtract);
+			scene->images_drawn, scene->texels_drawn, scene->missing, (unsigned)scene->subtract, total_texels);
 	}
 	if (getenv("ORUNNERS_SCENE_QUADS") && (uint64_t)atoll(getenv("ORUNNERS_SCENE_QUADS")) == frame)
 		for (int index = 0; index < scene->count; index++)
