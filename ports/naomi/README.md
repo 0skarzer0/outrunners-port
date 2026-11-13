@@ -6,14 +6,18 @@ Work in progress for a Crazy Taxi upright with a NAOMI 2 and a 512 MB NetDIMM lo
 
 ## Stages
 
-1. **Boot and measure** (this directory today): the game's C, the board and the sound program on the SH-4; the
-   cabinet's controls through the JVS; `runtime/src/video.c` drawn every few frames into a framebuffer, only to
-   see something; the time each part takes, read live from the Raspberry (`live.py`). **Runs on the board**
-   (2026-11-13, NAOMI 2 of a Crazy Taxi upright): see "Measured on the board".
-2. **PowerVR2 renderer** in place of `video.c`: tilemap pages as textures, NBG0 as a scrolled quad, NBG2 a strip a
-   line (row scroll and row select), sprites as quads from a texture cache, priorities as depth, fades.
-3. **Sound on the AICA:** the MultiPCM's 4 MB of samples (`orunners.pcm`) in the AICA's RAM, its 28 voices on AICA
-   channels. The YM3438 only gives the sound program its timers: OutRunners plays no FM note.
+1. **Boot and measure**: the game's C, the board and the sound program on the SH-4; the cabinet's controls through
+   the JVS; the time each part takes, read live from the Raspberry (`live.py`). Done (2026-11-13).
+2. **PowerVR2 renderer** in place of `video.c` (`ORUNNERS_VIDEO_SCENE`: runtime/src/video_scene.c makes the frame a
+   scene of textured quads, `pvr_video.c` draws it): tilemap pages and the text map as textures, NBG0 scrolled and
+   zoomed, NBG2 a strip a line (row scroll and row select), the bitmap layer (the road) by rows, sprites as quads
+   from a texture cache, priorities as depth, colour offsets as vertex colours, the sprites' shadow pen, the text
+   layer's blending over the sprites, fades taken away exactly. **Runs on the board at 60 fps** in attract mode and
+   most of a race (2026-11-13); the shadows, blending and fades are checked on a computer only so far.
+3. **Sound on the AICA** (`aica_sound.c`, runtime/src/multipcm_aica.c): the MultiPCM's 4 MB of samples
+   (`/dimm/orunners.pcm`) in the AICA's RAM, its 28 voices on AICA channels whose registers the SH-4 works out from
+   the MultiPCM's; the left seat's sound on both speakers. The YM3438 only gives the sound program its timers:
+   OutRunners plays no FM note. Checked on a computer (`ORUNNERS_AICA_WAV`, below); **not yet heard on the board**.
 4. **A converter for Windows**: drop `orunners.zip`, get the `.bin.gz`.
 
 ## Build
@@ -39,17 +43,11 @@ compiles with sh-elf-gcc 15.2.0 (`-m4-single -ml -O2`): 490 KB of code, 5.8 MB o
 
 ## Measured on the board (2026-11-13)
 
-Attract mode, a frame drawn every 60 (`live.py draw 60`), after the fixes below:
-
-| Part | Time a frame |
-|---|---:|
-| The game's C, the board, the interrupts | ~8 ms |
-| The sound program and the chips (MultiPCM in software, FM off) | ~2.9 ms |
-| `video.c`'s frame + the copy to the screen | **~360 ms** (about 22 frames) |
-
-So 57-60 game frames a second without the picture, and the software video at about 3 frames a second: the PowerVR2
-renderer (stage 2) is what the port needs, as the computer's measurements said. A profile of the drawn frames:
-`page_pixel`, `scrolled_pixel`, `zoomed_pixel`, `mix_rows`, the sprites' rows, and 32-bit divisions inside them.
+Stage 1 (the software `video.c`, a frame drawn every 60): the game's C, the board and the interrupts ~8 ms a frame,
+the sound program and the chips ~2.9 ms (the MultiPCM in software), `video.c`'s frame **~360 ms**: hence stage 2.
+Stage 2, a race (`race.py`): the game ~8 ms, the sound ~1.1 ms (no MultiPCM synthesis), the scene built ~4-5 ms and
+handed to the PowerVR2 ~1.2 ms: 60 fps, with dips where many colours change at once (palette cycling), which tables
+of colours by cell and the bitmap's rows redrawn only where seen should cut (not yet measured on the board).
 
 What it took to run (each found with the peeks):
 - **KallistiOS stops a thread whose stack pointer is below its stack's base** ("Thread stack underrun", checked at
@@ -61,12 +59,39 @@ What it took to run (each found with the peeks):
 - **The FM synthesis**, for a chip that plays no note in OutRunners: off (`ORUNNERS_NO_FM_SYNTHESIS`; the timers
   stay). **The sound tests' hashes** and **the sprites' erase for the screen not shown**: off on the NAOMI.
 - `video.c`'s 4 MB of state from the heap (`ORUNNERS_VIDEO_ON_HEAP`).
+- **Misaligned reads**: the V70 reads 16-bit words at odd addresses (src/objects/scenery.c's flashing scenery, the
+  game froze there); the SH-4 faults. `naomi_log.c` does them a byte at a time in the exception handler, in a
+  branch's delay slot too (counted in the live block, +0x78).
+- **The PowerVR2's wait is the vblank's**: `vid_waitvbl` on top of `pvr_wait_ready` halved the frame rate.
+- **newlib's `memcmp` goes a byte at a time** on the SH-4: the scene compares by words (`same()`).
+- **The MultiPCM in software** made a third of a race's frame (for silence: no samples in RAM): off
+  (`ORUNNERS_NO_PCM_SYNTHESIS`), now the AICA plays the voices.
 Checked on a computer: with `ORUNNERS_NAOMI ORUNNERS_NO_FM_SYNTHESIS ORUNNERS_PACKED_PENS`, the game state and video
 hashes of 3,501 frames of attract and race are the same as the normal build's.
 
 Testing traps: an unanswered peek keeps the NetDIMM busy for up to a minute (sends then time out: wait for
 `info()` to answer); and the Claude workspace's copy to the user's computer can deliver an older file under the same
 staged name (give each image a new name, check its md5).
+
+## Checked on a computer
+
+```sh
+# the scene drawn in software against video.c, a line every 30 frames (pixels that differ, quads, blending)
+cmake -B build-scene -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-DORUNNERS_VIDEO_SCENE
+make -C build-scene orunners_game_headless
+ORUNNERS_SCENE_COMPARE=/tmp/scene build/bin/orunners_game_headless --script race_arcade.txt --hashes /dev/null \
+    --video-hashes /dev/null --screens 1 --assets orunners.assets
+# the AICA's registers heard through a rough model of the chip, against the MultiPCM's own sound
+ORUNNERS_AICA_OUTPUT=1 ORUNNERS_AICA_WAV=aica.wav build/bin/orunners_game_headless --script race_arcade.txt \
+    --hashes /dev/null --screens 1 --assets orunners.assets --sound-wav /dev/null
+build/bin/orunners_game_headless --script race_arcade.txt --hashes /dev/null --screens 1 \
+    --assets orunners.assets --sound-wav reference.wav
+```
+
+Results (2026-11-13, the arcade race script, 9,000 frames): the scene's pixels differing from `video.c`'s, 0.68 %
+over all frames (the edges of zoomed sprites; shadows that overlap darken twice; a fade's shadows a little darker).
+The AICA model's sound against the MultiPCM's (its left speaker, the left seat): loudness a frame correlated 0.89,
+spectra over 4 s 0.98-0.997, the same level. (`race_arcade.txt` is in naomi-wheel-games, `outrunners/`.)
 
 ## On the board
 
@@ -78,8 +103,7 @@ Live figures, on the Raspberry of the cabinet (DragonMinded's netdimm.py), with 
 prints:
 
 ```sh
-python3 live.py 10.0.0.4 0x8c...... fps 60     # game fps, frames drawn, us of the game, sound and video
-python3 live.py 10.0.0.4 0x8c...... draw 8     # a frame drawn every 8
+python3 live.py 10.0.0.4 0x8c...... fps 60     # game fps, us of the game, sound and video, misaligned, AICA writes
 python3 live.py 10.0.0.4 0x8c...... log        # the console
 ```
 
@@ -87,7 +111,8 @@ A failure, or no game frame for 10 s, puts the console's last lines on the scree
 pr for `sh-elf-addr2line` on `orunners_naomi.elf`); an exception nothing handles writes its code, pc, pr and address
 to the console and keeps answering peeks (the live block's version becomes 0xdeadXXXX).
 
-More tools for the Raspberry: `watch.py LIVE [ADDR VALUE]` (a poke, then the console's lines as they come, until the
+`race.py LIVE SECONDS` plays without anyone at the cabinet (a coin, START, the gas down and the wheel swinging,
+through the live block's `test_inputs`) and prints the same figures. More tools for the Raspberry: `watch.py LIVE [ADDR VALUE]` (a poke, then the console's lines as they come, until the
 peeks stop: the last thing said before a crash) and `profile.py LIVE [DRAW_EVERY]` (the game thread's pc sampled by
 a thread of the program, `sh-elf-addr2line -f` names them). Test builds: `make EXTRA=-DORUNNERS_NAOMI_STAGE=N` stops
 `main()` at stage 0 (KallistiOS and the peeks), 1 (the assets read) or 2 (everything ready; waits for a poke of
@@ -99,5 +124,8 @@ The NetDIMM files, the peeks, the console ring and `naomi_pack.py` come from the
 native port ([0skarzer0/daytona-arcade-recomp](https://github.com/0skarzer0/daytona-arcade-recomp), branch
 `naomi-native`); the peek protocol and the cartridge port's reads follow DragonMinded's
 [libnaomi](https://github.com/DragonMinded/libnaomi) and [netboot](https://github.com/DragonMinded/netboot). Built
-on [KallistiOS](https://github.com/KallistiOS/KallistiOS). The game's C, its runtime and its tools are cheviman's
+on [KallistiOS](https://github.com/KallistiOS/KallistiOS) (its PowerVR2 and AICA support; the AICA's registers as
+its sound driver and [MAME](https://github.com/mamedev/mame)'s `sound/aica.cpp` use them). The MultiPCM's
+behaviour is MAME's `sound/multipcm.cpp` (Miguel Angel Horna), as runtime/src/multipcm.c follows it; the
+System 32 video chip's, MAME's `sega/segas32_v.cpp` (Aaron Giles), as runtime/src/video.c follows it. The game's C, its runtime and its tools are cheviman's
 (Sebastian Toyos). OutRunners is a trademark of SEGA; this project is not affiliated with or endorsed by SEGA.
