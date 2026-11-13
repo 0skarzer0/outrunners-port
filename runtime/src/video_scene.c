@@ -219,7 +219,7 @@ static void mix_update(int drawn)
 
 			if (with == 0 || !bit((uint32_t)drawn, index))
 				continue;
-			/* the text over the sprites, all OutRunners does (docs/outrunners.md); anything else is not drawn */
+			/* the text over the sprites, all OutRunners does (ports/naomi/docs/study.md); anything else is not drawn */
 			if (index == LAYER_TEXT && with == 1 << LAYER_SPRITES)
 			{
 				scene.text_blends = true;

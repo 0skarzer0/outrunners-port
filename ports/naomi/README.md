@@ -2,7 +2,7 @@
 
 Work in progress for a Crazy Taxi upright with a NAOMI 2 and a 512 MB NetDIMM loaded by a Raspberry Pi
 (WiPi Netbooter). The study behind it (what each part costs, what the game uses of the System 32 video chip):
-[docs/outrunners.md of 0skarzer0/naomi-wheel-games](https://github.com/0skarzer0/naomi-wheel-games/blob/main/docs/outrunners.md).
+[docs/study.md](docs/study.md) (in Spanish). The state of the work and how to carry on: [HANDOFF.md](HANDOFF.md).
 
 ## Stages
 
@@ -35,7 +35,7 @@ ports/naomi/build_naomi.sh /path/to/orunners.zip build/naomi
 ```
 
 Needs the sh-elf toolchain and KallistiOS built for `KOS_SUBARCH=naomi` (`KOS_NAOMI`, default
-`/opt/toolchains/dc/kos-naomi`; recipe: `outrunners/build_toolchain.sh` of naomi-wheel-games), CMake, a C compiler
+`/opt/toolchains/dc/kos-naomi`; recipe: `ports/naomi/build_toolchain.sh`), CMake, a C compiler
 and Python 3. Out: `build/naomi/orunners_naomi.bin.gz` for the netbooter. It is made from the player's ROM set:
 never share it.
 

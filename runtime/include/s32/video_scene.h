@@ -5,7 +5,7 @@
  *    Created:     13-11-2026
  *
  *    license:BSD-3-Clause
- *    What it covers is what OutRunners uses of the chips (docs/outrunners.md of 0skarzer0/naomi-wheel-games): the
+ *    What it covers is what OutRunners uses of the chips (ports/naomi/docs/study.md): the
  *    text layer, NBG0 (scroll and zoom), NBG2 (scroll, row scroll, row select), the backdrop, the sprites (zoom,
  *    flips, 8 bits, indirect colours, the list's clip rectangle) and the mixer's priorities and colour offsets.
  *    Blending: the text layer's over the sprites, by 8 x 8 cells over the sprites' rectangles. Shadows: the

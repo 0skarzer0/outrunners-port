@@ -2,9 +2,9 @@
 
 > **This fork's branch `naomi`:** the game on a SEGA NAOMI / NAOMI 2 netbooted from a NetDIMM (a Crazy Taxi upright
 > with its wheel, pedals and shifter): [`ports/naomi/`](ports/naomi/README.md). Part of
-> [0skarzer0/naomi-wheel-games](https://github.com/0skarzer0/naomi-wheel-games), whose
-> [`outrunners/HANDOFF.md`](https://github.com/0skarzer0/naomi-wheel-games/blob/main/outrunners/HANDOFF.md) has the state
-> of the work. Everything else here is cheviman's [outrunners-port](https://github.com/cheviman/outrunners-port), to
+> [0skarzer0/naomi-wheel-games](https://github.com/0skarzer0/naomi-wheel-games). The state of the work and how to carry
+> on: [`ports/naomi/HANDOFF.md`](ports/naomi/HANDOFF.md); the study behind it:
+> [`ports/naomi/docs/study.md`](ports/naomi/docs/study.md) (both in Spanish). Everything else here is cheviman's [outrunners-port](https://github.com/cheviman/outrunners-port), to
 > whom all the credit for the game's C, its runtime and its tools goes.
 
 Sega's 1992 arcade game *OutRunners* as a native game for computers, the Nintendo Switch, Android and Anbernic's

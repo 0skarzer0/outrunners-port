@@ -7,7 +7,7 @@
  *    Created:     13-11-2026
  *
  *    license:BSD-3-Clause
- *    What it is for: measuring on the board what docs/outrunners.md of 0skarzer0/naomi-wheel-games estimated from
+ *    What it is for: measuring on the board what ports/naomi/docs/study.md estimated from
  *    a computer (the game's C and the Z80's well inside a frame, video.c about ten times over it), before the
  *    PowerVR2 renderer replaces video.c.
  *
