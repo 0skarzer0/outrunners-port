@@ -8,10 +8,10 @@
 ROOT := ../..
 TARGET = orunners_naomi.elf
 
-RUNTIME = machine io sound ym3438 memory_census tasks video workers multipcm sound_chips sound_cpu \
+RUNTIME = machine io sound ym3438 memory_census tasks video multipcm sound_chips sound_cpu \
 	game assets assets_media assets_midi assets_pack json png inflate
 GAME_C := $(shell find $(ROOT)/src -name '*.c')
-OBJS = main.o naomi_log.o naomi_dimmfs.o naomi_dimmcomms.o \
+OBJS = main.o naomi_log.o naomi_dimmfs.o naomi_dimmcomms.o workers_none.o \
 	$(addprefix runtime/,$(addsuffix .o,$(RUNTIME))) \
 	$(patsubst $(ROOT)/src/%.c,game/%.o,$(GAME_C))
 
