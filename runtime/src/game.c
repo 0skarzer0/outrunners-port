@@ -17,6 +17,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define PSW_IE        (1u << 18)    /* maskable interrupts enabled */
 #define PSW_IS        (1u << 28)    /* running on the interrupt stack */
@@ -259,11 +260,22 @@ uint8_t *ram_outside(uint32_t address)
 			copy = outside_next;
 			outside_next = (outside_next + 1) % OUTSIDE_COPIES;
 		}
-		for (uint32_t index = 0; index < sizeof outside_copy[copy]; index++)
+		for (uint32_t index = 0; index < sizeof outside_copy[copy];)
 		{
-			/* (0 where no piece has data: what the code reads through such a copy is the ROM's data) */
-			const uint8_t *byte = data_if_any(address + index);
-			outside_copy[copy][index] = byte ? *byte : 0;
+			/* (0 where no piece has data: what the code reads through such a copy is the ROM's data; a run of
+			   it at a time, not a search for every byte) */
+			uint32_t run = 0;
+			const uint8_t *bytes = data_span(address + index, &run);
+
+			if (!bytes || run == 0)
+			{
+				outside_copy[copy][index++] = 0;
+				continue;
+			}
+			if (run > sizeof outside_copy[copy] - index)
+				run = (uint32_t)sizeof outside_copy[copy] - index;
+			memcpy(&outside_copy[copy][index], bytes, run);
+			index += run;
 		}
 		outside_address[copy] = address;
 		return outside_copy[copy];

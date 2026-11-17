@@ -19,6 +19,7 @@ static struct
 {
 	uint16_t *texels[IMAGES];
 	int width[IMAGES], height[IMAGES];
+	bool pens[IMAGES];    /* an image of pens (a byte's worth in each texel), coloured by the quad's palette */
 	long budget;          /* texels left, as a video memory would have */
 } soft;
 
@@ -39,12 +40,34 @@ static int soft_create(void *context, int width, int height)
 	return 0;
 }
 
+/* (an image of pens costs a quarter: 4 bits a texel, as on the PowerVR2) */
+static int soft_create_pens(void *context, int width, int height)
+{
+	int image;
+	const long budget = soft.budget;
+
+	soft.budget = soft.budget * 4;
+	image = soft_create(context, width, height);
+	soft.budget = image ? budget - (long)width * height / 4 : budget;
+	if (image)
+		soft.pens[image] = true;
+	return image;
+}
+
+static void soft_write_pens(void *context, int image, int width, int height, const uint8_t *pens)
+{
+	(void)context;
+	for (long index = 0; index < (long)width * height; index++)
+		soft.texels[image][index] = pens[index];
+}
+
 static void soft_free(void *context, int image)
 {
 	(void)context;
 	if (image > 0 && image < IMAGES && soft.texels[image])
 	{
-		soft.budget += (long)soft.width[image] * soft.height[image];
+		soft.budget += (long)soft.width[image] * soft.height[image] / (soft.pens[image] ? 4 : 1);
+		soft.pens[image] = false;
 		free(soft.texels[image]);
 		soft.texels[image] = NULL;
 	}
@@ -58,12 +81,15 @@ static void soft_write(void *context, int image, int x, int y, int width, int he
 			(size_t)width * sizeof(uint16_t));
 }
 
-static const s32_scene_backend backend = { NULL, soft_create, soft_free, soft_write };
+static const s32_scene_backend backend = { NULL, soft_create, soft_free, soft_write, NULL, NULL };
+static const s32_scene_backend backend_pens = { NULL, soft_create, soft_free, soft_write, soft_create_pens, soft_write_pens };
+static bool with_pens;
 
 const s32_scene_backend *s32_scene_soft_backend(long texels)
 {
 	soft.budget = texels;
-	return &backend;
+	with_pens = !getenv("ORUNNERS_SCENE_NO_PENS");
+	return with_pens ? &backend_pens : &backend;
 }
 
 static int by_depth(const void *a, const void *b)
@@ -115,6 +141,9 @@ void s32_scene_soft_draw(const s32_scene_frame *frame, uint32_t *rgb, int stride
 					u = u < 0 ? 0 : (u >= width ? width - 1 : u);
 					v = v < 0 ? 0 : (v >= height ? height - 1 : v);
 					texel = soft.texels[quad->image][(size_t)v * (size_t)width + (size_t)u];
+					if (soft.pens[quad->image])
+						texel = quad->palette >= 0 && quad->palette < frame->palette_count
+							? frame->palettes[quad->palette][texel & 15] : 0;
 				}
 				if (!(texel & 0x8000))
 					continue;

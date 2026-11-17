@@ -114,6 +114,31 @@ Imagen `or_213421.bin.gz` (md5 `53940196ce7cdb338ca2e5d04ee0c33c`, rama `naomi` 
 - `misaligned` 101 (resueltos por el kit, sin cuelgue).
 - Falta lo que solo ve quien está delante: sonido, sombras, fundidos, START = moneda.
 
+## Texturas con paleta y menos CPU (2026-11-13 noche y 2026-11-17)
+
+- **Sprites de 4 bits como texturas con paleta** (`PAL4BPP`, gemelas en orden twiddled): la textura guarda solo los
+  pens (0 = no se dibuja: pen 0, fin de fila y códigos de fin) y el quad lleva uno de los 64 bancos de 16 colores
+  de la RAM de paleta de la PowerVR2, que se escriben tras `pvr_wait_ready` (el render anterior ya no la lee). Un
+  cambio de color no redibuja nada y ocupan la cuarta parte. Si no quedan bancos, o el sprite es de 8 bits, o su
+  tabla indirecta pinta el pen 0, va por el camino ARGB1555 de antes. La sombra usa la misma textura con una paleta
+  negra al 50 %. En el headless (`ORUNNERS_SCENE_NO_PENS=1` para comparar sin ellas): mismo 0,675 %.
+  Probado una vez en placa (`or_224236`): arranca y juega; falta que el usuario confirme los colores.
+- **Medido en placa** (render_us, pt/tr quads y área en el bloque live; profiler del kit con pr y sin las muestras
+  en espera): los tramos a 30 fps que quedaban no son de la PowerVR2 (pocos quads, 2-3 pantallas de área) sino de
+  la CPU al límite: juego 8,4 + sonido 1,1 + escena 5-6 + envío 1,6 ms ≈ 16,7. En el perfil: `same` (comparaciones
+  del bitmap, la paleta y el texto) 14 %, el Z80 6 %, `find`/`ram_outside` (copias de la ROM byte a byte) ~12 %,
+  `image_write` 5 %.
+- Arreglos (sin probar en placa aún, imagen `or_210303.bin.gz`, md5 `337dc13ede2ec323584298d922280e7a`):
+  `ram_outside` copia por tramos (`data_span`) en vez de buscar cada byte; `same` pide las líneas de caché por
+  adelantado; `image_write` y los pens por **store queues** (ráfagas de 32 bytes); las áreas de las estadísticas
+  solo cada 30 fotogramas. Headless: estado del juego idéntico en 9001 fotogramas, escena igual (0,675 %).
+- **Lo que queda: los picos al cambiar los colores del fondo.** En el headless son las páginas de tilemap
+  (33 000 texeles por fotograma en los peores tramos), no los sprites. El port de Dreamcast de
+  [MisterPezz82](https://github.com/MisterPezz82/OutRunners-Dreamcast) (0.4, BSD-3, sobre este mismo upstream)
+  lo resolvió con un **almacén de tiles de 4 bits en memoria de vídeo y un quad por celda con paleta**
+  (`docs/dreamcast/REDESIGN.md`, `ports/dreamcast/pvr/`), y además aceleró el Z80 (`board_time` sin división
+  de 64 bits) y solo mira las celdas que cambian. Es el camino a seguir aquí (la NAOMI tiene el doble de memoria).
+
 ## Auditoría en placa: lentitud y coche que desaparece (2026-11-13, 22:00-22:30)
 
 Medido con `live.py ADDR watch 150` mientras el usuario jugaba (trazas en la Pi: `/tmp/or_trace*.txt`).

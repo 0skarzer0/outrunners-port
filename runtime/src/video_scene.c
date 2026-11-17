@@ -71,12 +71,13 @@ typedef struct scene_slot
 	uint16_t colour, transparent_bits;
 	uint16_t table[16];
 	uint16_t palette_base;
-	uint8_t shift, flags;            /* flags: bits8 1, indirect 2, opaque 4 */
+	uint8_t shift, flags;            /* flags: bits8 1, indirect 2, opaque 4, pens 8 (an image of pens, no colours) */
 	uint32_t version;                /* of the colours it was drawn with */
 	int image;
 	int width, height;               /* the image's (powers of two) */
 	int shadow_image;                /* its shadow pen's texels (opaque black), 0 if it has none */
 	uint32_t used;
+	uint16_t pens_used;              /* an image of pens: the pens in it (bit n: pen n) */
 } scene_slot;
 
 /* A layer's (or a sprite group's) place in the mix */
@@ -114,6 +115,10 @@ static struct
 	int character_bank;
 	uint16_t pixels[512 * 256];      /* an image as it is made */
 	uint16_t shadow_pixels[512 * 256];    /* ... a sprite's shadow image */
+	uint8_t pens[512 * 256];         /* ... an image of pens */
+	uint16_t palettes[S32_SCENE_PALETTES][16];    /* this frame's, for the images of pens */
+	uint32_t palette_hashes[S32_SCENE_PALETTES];
+	int palette_count;
 	uint32_t missing;
 	struct
 	{
@@ -147,9 +152,18 @@ static bool same(const void *first, const void *second, size_t bytes)
 
 	if (((uintptr_t)first | (uintptr_t)second) & 3)
 		return memcmp(first, second, bytes) == 0;
-	for (size_t words = bytes / 4; words; words -= 4, a += 4, b += 4)
+	/* (the next cache lines asked for ahead: on the NAOMI the compares wait mostly for memory) */
+	for (size_t words = bytes / 4; words; words -= 8, a += 8, b += 8)
+	{
+		__builtin_prefetch(a + 16);
+		__builtin_prefetch(b + 16);
 		if ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3]))
 			return false;
+		if (words == 4)
+			break;
+		if ((a[4] ^ b[4]) | (a[5] ^ b[5]) | (a[6] ^ b[6]) | (a[7] ^ b[7]))
+			return false;
+	}
 	return true;
 }
 
@@ -302,6 +316,7 @@ static s32_scene_quad *new_quad(const scene_layer *layer, int image)
 	quad->modulate = layer->modulate;
 	quad->add = layer->add;
 	quad->weight = 8;
+	quad->palette = -1;
 	return quad;
 }
 
@@ -329,11 +344,12 @@ static scene_slot *oldest_sprite_image(const scene_slot *keep)
 }
 
 /* An image, letting old sprite images go while there is no room; 0 if there is none even so */
-static int image_with_room(int width, int height, const scene_slot *keep)
+static int image_of_room(int width, int height, const scene_slot *keep, bool pens)
 {
 	int image;
 
-	while (!(image = scene.backend->image_create(scene.backend->context, width, height)))
+	while (!(image = pens ? scene.backend->image_create_pens(scene.backend->context, width, height)
+		: scene.backend->image_create(scene.backend->context, width, height)))
 	{
 		scene_slot *oldest = oldest_sprite_image(keep);
 
@@ -371,6 +387,11 @@ static int image_with_room(int width, int height, const scene_slot *keep)
 		}
 	}
 	return image;
+}
+
+static int image_with_room(int width, int height, const scene_slot *keep)
+{
+	return image_of_room(width, height, keep, false);
 }
 
 /* ---- tilemap pages and the text map as images ---- */
@@ -1236,6 +1257,8 @@ static uint32_t sprite_version(const scene_slot *slot)
 {
 	uint32_t version = 0;
 
+	if (slot->flags & 8)
+		return 0;    /* (pens: no colours) */
 	if (!(slot->flags & 2))
 	{
 		/* (a direct colour: one bank, or 16 for 8 bits, the pens' high nibble over the colour's) */
@@ -1260,7 +1283,7 @@ static int power_of_two(int value)
 }
 
 /* The sprite's image in its group's colours: found, or made (an old one let go when there is no room) */
-static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *group)
+static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *group, bool as_pens)
 {
 	scene_slot key;
 	uint32_t hash = 2166136261u;
@@ -1270,12 +1293,18 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 	key.place = sprite->place;
 	key.words = sprite->words;
 	key.rows = sprite->rows;
-	key.colour = sprite->colour;
-	key.transparent_bits = sprite->transparent_bits;
-	memcpy(key.table, sprite->table, sizeof(key.table));
-	key.palette_base = group->palette_base;
-	key.shift = group->shift;
-	key.flags = (uint8_t)((sprite->bits8 ? 1 : 0) | (sprite->indirect ? 2 : 0) | (sprite->opaque ? 4 : 0));
+	if (as_pens)
+		/* an image of pens: the graphics alone (where the rows end too); the colours come with the quad */
+		key.flags = (uint8_t)((sprite->opaque ? 4 : 0) | 8);
+	else
+	{
+		key.colour = sprite->colour;
+		key.transparent_bits = sprite->transparent_bits;
+		memcpy(key.table, sprite->table, sizeof(key.table));
+		key.palette_base = group->palette_base;
+		key.shift = group->shift;
+		key.flags = (uint8_t)((sprite->bits8 ? 1 : 0) | (sprite->indirect ? 2 : 0) | (sprite->opaque ? 4 : 0));
+	}
 	{
 		const uint8_t *bytes = (const uint8_t *)&key.place;
 		const size_t length = (size_t)((const uint8_t *)&key.version - bytes);
@@ -1328,9 +1357,16 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 		return NULL;
 	}
 	{
-		const int image = slot->image, shadow_image = slot->shadow_image;
+		int image = slot->image;
+		const int shadow_image = slot->shadow_image;
 		const int width = slot->width, height = slot->height;
 
+		if (image && ((slot->flags ^ key.flags) & 8))
+		{
+			/* (the slot held the other kind of image: pens and colours do not share one) */
+			scene.backend->image_free(scene.backend->context, image);
+			image = 0;
+		}
 		*slot = key;
 		slot->image = image;
 		slot->shadow_image = shadow_image;
@@ -1356,10 +1392,51 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 			scene.backend->image_free(scene.backend->context, slot->shadow_image);
 			slot->shadow_image = 0;
 		}
-		if (!slot->image && !(slot->image = image_with_room(width, height, slot)))
+		if (!slot->image && !(slot->image = image_of_room(width, height, slot, as_pens)))
 			return NULL;
 		slot->width = width;
 		slot->height = height;
+		if (as_pens)
+		{
+			uint16_t used = 0;
+
+			memset(scene.pens, 0, (size_t)width * (size_t)height);
+			for (int row = 0; row < sprite->rows; row++)
+			{
+				uint8_t *out = &scene.pens[row * width];
+				const uint32_t bank = sprite->place >> 20;
+				uint32_t address = (sprite->place & 0xfffff) + (uint32_t)(row * sprite->words);
+				bool ended = false;
+				int x = 0;
+
+				for (int word_index = 0; word_index < sprite->words && !ended; word_index++)
+				{
+					const uint32_t word = sprite_graphics(false, bank, address & 0xfffff);
+					int pen = 0;
+
+					address++;
+					for (int index = 0; index < 8; index++, x++)
+					{
+						const int skipped = (index == 0 || index == 7) ? end_pen : 0;
+
+						pen = (int)(word >> (28 - 4 * index)) & 15;
+						if (pen != skipped)
+						{
+							out[x] = (uint8_t)pen;
+							used |= (uint16_t)(1u << pen);
+						}
+					}
+					if (end_pen != 0 && pen == 15)
+						ended = true;
+				}
+			}
+			scene.backend->image_write_pens(scene.backend->context, slot->image, width, height, scene.pens);
+			slot->pens_used = used;
+			scene.out.images_drawn++;
+			scene.out.texels_drawn += width * sprite->rows;
+			slot->used = scene.frame;
+			return slot;
+		}
 		for (int row = 0; row < sprite->rows; row++)
 		{
 			uint16_t *out = &scene.pixels[row * width];
@@ -1416,6 +1493,77 @@ static scene_slot *sprite_image(const scene_sprite *sprite, const scene_layer *g
 	return slot;
 }
 
+/* A palette of the frame (an index), made or found: 'entries' the 16 colours */
+static int frame_palette(const uint16_t entries[16])
+{
+	uint32_t hash = 2166136261u;
+
+	for (int pen = 0; pen < 16; pen++)
+		hash = (hash ^ entries[pen]) * 16777619u;
+	for (int index = 0; index < scene.palette_count; index++)
+		if (scene.palette_hashes[index] == hash && memcmp(scene.palettes[index], entries, 32) == 0)
+			return index;
+	if (scene.palette_count >= S32_SCENE_PALETTES)
+		return -1;
+	memcpy(scene.palettes[scene.palette_count], entries, 32);
+	scene.palette_hashes[scene.palette_count] = hash;
+	return scene.palette_count++;
+}
+
+/* The colours of a 4-bit sprite's pens in its group, as the frame's palettes: the pens drawn (with pen 0 and the
+   transparent ones clear), and in 'shadow' those of its shadow pen (black, the rest clear) or -1 when it has none
+   in 'used'. -1 when the frame has no palette left */
+static int sprite_palette(const scene_sprite *sprite, const scene_layer *group, uint16_t used, int *shadow)
+{
+	scene_slot colours;
+	uint16_t entries[16], shade[16];
+	bool shadowed = false;
+
+	memset(&colours, 0, sizeof(colours));
+	colours.colour = sprite->colour;
+	colours.transparent_bits = sprite->transparent_bits;
+	memcpy(colours.table, sprite->table, sizeof(colours.table));
+	colours.flags = (uint8_t)(sprite->indirect ? 2 : 0);
+	for (int pen = 0; pen < 16; pen++)
+	{
+		int pixel = pen ? sprite_pixel(&colours, pen) : -1;
+
+		shade[pen] = 0;
+		if (pixel >= 0 && ((pixel & 0x7fff) == 0x7fff || ((pixel & scene.sprite_bits) & 0x7ffe) == (0x7ffe & scene.sprite_bits)))
+		{
+			if ((pixel & 0x7fff) != 0x7fff && (used >> pen & 1))
+			{
+				shade[pen] = 0x8000;
+				shadowed = true;
+			}
+			pixel = -1;
+		}
+		entries[pen] = pixel < 0 ? 0 : argb1555(scene.palette[palette_index(group->palette_base, group->shift,
+			pixel & scene.sprite_bits)]);
+	}
+	*shadow = shadowed ? frame_palette(shade) : -1;
+	if (shadowed && *shadow < 0)
+		return -1;
+	return frame_palette(entries);
+}
+
+/* Whether a sprite can be an image of pens: 4 bits, and its pen 0 not drawn (the pens' image keeps 0 for every
+   texel not drawn: the rows' ends and the end codes) */
+static bool sprite_pens(const scene_sprite *sprite)
+{
+	scene_slot colours;
+
+	if (!scene.backend->image_create_pens || sprite->bits8)
+		return false;
+	if (!sprite->indirect)
+		return true;
+	memset(&colours, 0, sizeof(colours));
+	colours.transparent_bits = sprite->transparent_bits;
+	memcpy(colours.table, sprite->table, sizeof(colours.table));
+	colours.flags = 2;
+	return sprite_pixel(&colours, 0) < 0;
+}
+
 static void sprite_quads(void)
 {
 	const int list = scene.shown;
@@ -1425,11 +1573,21 @@ static void sprite_quads(void)
 	{
 		const scene_sprite *sprite = &scene.sprites[list][index];
 		const scene_layer *group = &scene.groups[sprite_group(sprite)];
-		const scene_slot *slot = sprite_image(sprite, group);
+		const scene_slot *slot = NULL;
+		int palette = -1, shadow_palette = -1;
 		s32_scene_quad *quad;
 
+		if (sprite_pens(sprite) && (slot = sprite_image(sprite, group, true)) != NULL
+			&& (palette = sprite_palette(sprite, group, slot->pens_used, &shadow_palette)) < 0)
+			slot = NULL;
+		if (!slot)
+		{
+			palette = shadow_palette = -1;
+			slot = sprite_image(sprite, group, false);
+		}
 		if (!slot || !(quad = new_quad(group, slot->image)))
 			continue;
+		quad->palette = (int16_t)palette;
 		quad->z = group->z + 0.5f * (float)(index + 1) / (float)(count + 1);    /* (later ones in front) */
 		quad->x0 = (float)sprite->x0;
 		quad->y0 = (float)sprite->y0;
@@ -1439,7 +1597,21 @@ static void sprite_quads(void)
 		quad->v0 = sprite->v0;
 		quad->u1 = sprite->u1;
 		quad->v1 = sprite->v1;
-		if (slot->shadow_image)
+		if (shadow_palette >= 0)
+		{
+			/* (the same pens, its shadow pen black at half) */
+			s32_scene_quad *shade = new_quad(group, slot->image);
+
+			if (shade)
+			{
+				*shade = *quad;
+				shade->palette = (int16_t)shadow_palette;
+				shade->modulate = 0;
+				shade->add = 0;
+				shade->weight = 4;
+			}
+		}
+		else if (palette < 0 && slot->shadow_image)
 		{
 			/* the shadow pen: what is under it at half (video.c's mix: shift_down by 1) */
 			const s32_scene_quad drawn = *quad;
@@ -1506,6 +1678,9 @@ const s32_scene_frame *s32_scene_build(void)
 	scene.out.count = 0;
 	scene.out.images_drawn = 0;
 	scene.out.texels_drawn = 0;
+	scene.out.palettes = (const uint16_t (*)[16])scene.palettes;
+	scene.out.palette_count = 0;
+	scene.palette_count = 0;
 	scene.missing = 0;
 	scene.out.subtract = 0;
 	scene.text_quad = -1;
@@ -1544,6 +1719,7 @@ const s32_scene_frame *s32_scene_build(void)
 		bitmap_quads();
 	sprite_quads();
 	text_blend_quads();
+	scene.out.palette_count = scene.palette_count;
 	scene.out.missing = scene.missing;
 	return &scene.out;
 }

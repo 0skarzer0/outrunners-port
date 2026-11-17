@@ -56,6 +56,8 @@ const uint8_t *data_byte_at(uint32_t address);
 /* The same for an address of the program's chips without stopping: NULL where no piece has data (the copies
    of the ROM ram_outside makes, for a pointer the C keeps that may hold an address nothing reads through) */
 const uint8_t *data_if_any(uint32_t address);
+/* data_if_any's byte and how many follow it in order (data_if_any(address + n) is that pointer + n for n < bytes) */
+const uint8_t *data_span(uint32_t address, uint32_t *bytes);
 
 /* The address of the program's data a pointer into one of its pieces, or just past its end, stands for (1),
    or 0 where it points into none: the address the original holds for what a pointer the C keeps into the ROM

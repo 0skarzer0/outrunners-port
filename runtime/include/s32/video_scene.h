@@ -38,7 +38,15 @@ typedef struct
 	/* width x height texels at (x, y) of an image, 'stride' texels a row in 'pixels'; width is even */
 	void (*image_write)(void *context, int image, int x, int y, int width, int height, const uint16_t *pixels,
 		int stride);
+	/* Optional (NULL: the sprites' images are all ARGB1555): an image of 4-bit pens that a quad colours through
+	   one of the frame's palettes (s32_scene_quad's 'palette'), so that a change of colours costs no drawing; and
+	   its whole width x height pens, one byte each, a row after the other */
+	int (*image_create_pens)(void *context, int width, int height);
+	void (*image_write_pens)(void *context, int image, int width, int height, const uint8_t *pens);
 } s32_scene_backend;
+
+/* Palettes of 16 colours a frame can give its pens' images (the PowerVR2's palette RAM holds 64) */
+#define S32_SCENE_PALETTES 64
 
 /* One quad: its screen rectangle (pixels, the left and top edges in, the right and bottom out), the image's
    texels at its corners (u0, v0 at x0, y0; u1, v1 at x1, y1: a flip has them the other way), its depth, and the
@@ -56,6 +64,9 @@ typedef struct
 	uint32_t modulate;
 	uint32_t add;
 	uint8_t weight;
+	/* -1, or the image is of pens (image_create_pens) and they take the colours of the frame's palette of this
+	   number (ARGB1555 each, bit 15 drawn) */
+	int16_t palette;
 } s32_scene_quad;
 
 typedef struct
@@ -70,6 +81,9 @@ typedef struct
 	/* the work done: images (re)drawn, their texels */
 	int images_drawn;
 	int texels_drawn;
+	/* the palettes the quads with pens take (palette_count of them, at most S32_SCENE_PALETTES) */
+	const uint16_t (*palettes)[16];
+	int palette_count;
 } s32_scene_frame;
 
 #define S32_SCENE_MISSING_NBG1      0x0001u

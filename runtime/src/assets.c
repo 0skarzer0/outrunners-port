@@ -1089,6 +1089,27 @@ const uint8_t *data_if_any(uint32_t address)
 	return find(&program, folded(place));
 }
 
+const uint8_t *data_span(uint32_t address, uint32_t *bytes)
+{
+	const uint32_t place = address & 0xffffff;
+	const uint32_t at = folded(place);
+	const uint8_t *data;
+	uint32_t left;
+
+	if (place >= 0x200000 && (place & 0xf00000) != 0xf00000)
+		return NULL;
+	if (!(data = find(&program, at)))
+		return NULL;
+	left = program.pieces[program.last].address + program.pieces[program.last].size - at;
+	{
+		/* (no further than the next 256 KB: the folding repeats there) */
+		const uint32_t fold = 0x40000u - (place & 0x3ffff);
+
+		*bytes = left < fold ? left : fold;
+	}
+	return data;
+}
+
 const uint8_t *assets_sound_data(uint32_t offset)
 {
 	return find(&sound, offset);

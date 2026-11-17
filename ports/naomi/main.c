@@ -99,7 +99,7 @@ static void on_controls_update(void)
 static uint64_t frame_started, video_time, sound_time, frame_worst;
 static uint64_t second_game, second_sound, second_video, second_texels, second_build, second_wait, second_submit;
 static uint32_t missing_seen;
-static uint32_t second_frames, second_drawn;
+static uint32_t second_frames, second_drawn, second_render;
 
 /* The last second's figures, from naomi-kit's peek thread once a second */
 static void naomi_live_second(void)
@@ -123,6 +123,8 @@ static void naomi_live_second(void)
 	orunners_naomi_live.build_us = drawn ? (uint32_t)(build / drawn) : 0;
 	orunners_naomi_live.wait_us = drawn ? (uint32_t)(wait / drawn) : 0;
 	orunners_naomi_live.submit_us = drawn ? (uint32_t)(submit / drawn) : 0;
+	orunners_naomi_live.render_us = second_render;
+	second_render = 0;
 }
 
 /* ---- the picture: the scene on the PowerVR2 (pvr_video.c) ---- */
@@ -148,6 +150,12 @@ static void on_frame_shown(void)
 		missing_seen |= stats.missing;
 	}
 	orunners_naomi_live.quads = (uint32_t)stats.quads;
+	if (stats.render_us > second_render)
+		second_render = stats.render_us;
+	orunners_naomi_live.pt_quads = (uint32_t)stats.pt_quads;
+	orunners_naomi_live.tr_quads = (uint32_t)stats.tr_quads;
+	orunners_naomi_live.pt_kpixels = stats.pt_pixels / 1000;
+	orunners_naomi_live.tr_kpixels = stats.tr_pixels / 1000;
 	if (orunners_naomi_live.sound_writes != 0xffffffffu)
 		orunners_naomi_live.sound_writes = aica_sound_register_writes();
 	orunners_naomi_live.missing = missing_seen;

@@ -36,11 +36,15 @@ typedef struct
 	uint32_t wait_us;          /* ... waiting for the PowerVR2 */
 	uint32_t submit_us;        /* ... the quads handed to it */
 	uint32_t sound_writes;     /* the AICA's channel registers written (aica_sound.c); 0xffffffff no samples */
+	uint32_t render_us;        /* the PowerVR2's render of a frame, the longest in the last second (pvr_get_stats) */
+	uint32_t pt_quads, tr_quads;    /* the last frame's punch-through and translucent quads */
+	uint32_t pt_kpixels, tr_kpixels;    /* ... their area on the 320 x 224 screen, thousands of pixels (overdraw) */
 } orunners_naomi_live_t;
 
 #define ORUNNERS_LIVE_NAMES "game_frames drawn_frames game_us sound_us video_us worst_frame_us frames_total quads " \
-	"texels_drawn missing video_memory_free textures build_us wait_us submit_us sound_writes"
-#define ORUNNERS_LIVE_COUNT 16
+	"texels_drawn missing video_memory_free textures build_us wait_us submit_us sound_writes render_us pt_quads tr_quads " \
+	"pt_kpixels tr_kpixels"
+#define ORUNNERS_LIVE_COUNT 21
 
 extern volatile orunners_naomi_live_t orunners_naomi_live;
 

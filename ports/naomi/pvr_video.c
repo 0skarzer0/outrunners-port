@@ -16,6 +16,7 @@
  */
 #include <kos.h>
 #include <dc/pvr.h>
+#include <dc/sq.h>
 #include <arch/timer.h>
 
 #include "s32/video_scene.h"
@@ -31,6 +32,7 @@ static struct
 {
 	pvr_ptr_t base[IMAGES];
 	int width[IMAGES], height[IMAGES];
+	bool pens[IMAGES];        /* 4-bit pens, twiddled (paletted textures take no other order), coloured by the PVR's palette */
 	size_t free_at_start;
 	int images, failed;
 } pvr_images;
@@ -184,6 +186,71 @@ static int image_create(void *context, int width, int height)
 	return 0;
 }
 
+static int image_create_pens(void *context, int width, int height)
+{
+	(void)context;
+	for (int image = 1; image < IMAGES; image++)
+		if (!pvr_images.base[image])
+		{
+			pvr_ptr_t base = buddy_alloc((size_t)width * (size_t)height / 2);
+
+			if (!base)
+			{
+				pvr_images.failed++;
+				return 0;
+			}
+			pvr_images.base[image] = base;
+			pvr_images.width[image] = width;
+			pvr_images.height[image] = height;
+			pvr_images.pens[image] = true;
+			pvr_images.images++;
+			return image;
+		}
+	return 0;
+}
+
+/* A twiddled index's bits: x's and y's interleaved, y's lowest (KallistiOS's TWIDOUT) */
+static uint32_t spread(uint32_t value)
+{
+	value &= 0x3ff;
+	value = (value | value << 8) & 0x00ff00ffu;
+	value = (value | value << 4) & 0x0f0f0f0fu;
+	value = (value | value << 2) & 0x33333333u;
+	value = (value | value << 1) & 0x55555555u;
+	return value;
+}
+
+/* The pens, a byte each, twiddled two to a byte (the even texel in the low nibble), 32 bits at a time: a texture
+   longer one way than the other is squares of the shorter side one after the other */
+static void image_write_pens(void *context, int image, int width, int height, const uint8_t *pens)
+{
+	static uint32_t twiddled[512 * 256 / 8];
+	const int side = width < height ? width : height, mask = side - 1;
+	uint8_t *bytes = (uint8_t *)twiddled;
+	volatile uint32_t *out = (volatile uint32_t *)pvr_images.base[image];
+
+	(void)context;
+	memset(twiddled, 0, (size_t)width * (size_t)height / 2);
+	for (int y = 0; y < height; y++)
+		for (int x = 0; x < width; x++)
+		{
+			const uint8_t pen = pens[y * width + x];
+
+			if (pen)
+			{
+				const uint32_t texel = (spread((uint32_t)(y & mask)) | spread((uint32_t)(x & mask)) << 1)
+					+ (uint32_t)(x / side + y / side) * (uint32_t)side * (uint32_t)side;
+
+				bytes[texel >> 1] |= (uint8_t)(pen << ((texel & 1) * 4));
+			}
+		}
+	if (((uintptr_t)out & 31) == 0)
+		sq_cpy((void *)out, twiddled, (size_t)width * (size_t)height / 2);    /* (8 x 8 at least: 32 bytes) */
+	else
+		for (int index = 0; index < width * height / 8; index++)
+			out[index] = twiddled[index];
+}
+
 static void image_free(void *context, int image)
 {
 	(void)context;
@@ -191,18 +258,42 @@ static void image_free(void *context, int image)
 	{
 		buddy_free(pvr_images.base[image]);
 		pvr_images.base[image] = NULL;
+		pvr_images.pens[image] = false;
 		pvr_images.images--;
 	}
 }
 
-/* Texels into video memory, 32 bits at a time (it takes no byte writes; x and width are even) */
+/* Texels into video memory: by the store queues, 32 bytes a burst, where the rows are whole bursts (a tile's
+   row of 16 texels, most sprites' rows), else 32 bits at a time (it takes no byte writes; x and width are even).
+   One write at a time to video memory waits for the bus each time; a burst costs about as much as one */
 static void image_write(void *context, int image, int x, int y, int width, int height, const uint16_t *pixels, int stride)
 {
+	uint16_t *const base = (uint16_t *)pvr_images.base[image];
+	const size_t image_width = (size_t)pvr_images.width[image];
+
 	(void)context;
+	if (((x | width) & 15) == 0 && ((uintptr_t)base & 31) == 0 && (image_width & 15) == 0)
+	{
+		sq_lock(base);
+		for (int row = 0; row < height; row++)
+		{
+			uint32_t *queue = SQ_MASK_DEST(base + (size_t)(y + row) * image_width + (size_t)x);
+			const uint16_t *in = &pixels[(size_t)row * (size_t)stride];
+
+			for (int column = 0; column < width; column += 16, in += 16, queue += 8)
+			{
+				for (int word = 0; word < 8; word++)
+					queue[word] = (uint32_t)in[2 * word] | (uint32_t)in[2 * word + 1] << 16;
+				sq_flush(queue);
+			}
+		}
+		sq_wait();
+		sq_unlock();
+		return;
+	}
 	for (int row = 0; row < height; row++)
 	{
-		volatile uint32_t *out = (volatile uint32_t *)((uint16_t *)pvr_images.base[image]
-			+ (size_t)(y + row) * (size_t)pvr_images.width[image] + (size_t)x);
+		volatile uint32_t *out = (volatile uint32_t *)(base + (size_t)(y + row) * image_width + (size_t)x);
 		const uint16_t *in = &pixels[(size_t)row * (size_t)stride];
 
 		for (int column = 0; column < width; column += 2)
@@ -210,7 +301,16 @@ static void image_write(void *context, int image, int x, int y, int width, int h
 	}
 }
 
-static const s32_scene_backend backend = { NULL, image_create, image_free, image_write };
+static const s32_scene_backend backend = { NULL, image_create, image_free, image_write, image_create_pens,
+	image_write_pens };
+
+/* A quad's texture format: ARGB1555 as it lies, or pens through one of the palette RAM's 64 banks of 16 */
+static uint32_t texture_format(const s32_scene_quad *quad)
+{
+	if (pvr_images.pens[quad->image])
+		return PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(quad->palette < 0 ? 0 : quad->palette);
+	return PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED;
+}
 
 void pvr_video_start(void)
 {
@@ -223,6 +323,7 @@ void pvr_video_start(void)
 
 	pvr_init(&params);
 	pvr_set_bg_color(0, 0, 0);
+	pvr_set_pal_format(PVR_PAL_ARGB1555);
 	pvr_images.free_at_start = pvr_mem_available();
 	buddy_start();
 	printf("NAOMI: PowerVR2 on, %lu bytes of video memory, %d MB of it for the images\n",
@@ -277,7 +378,7 @@ void pvr_video_frame(pvr_video_stats *stats)
 	uint64_t ready;
 	pvr_poly_cxt_t context;
 	pvr_poly_hdr_t header;
-	int last_image = -1;
+	int last_image = -1, last_palette = -2;
 	bool last_add = false;
 	static uint16_t order[4096];
 	int ordered;
@@ -294,6 +395,34 @@ void pvr_video_frame(pvr_video_stats *stats)
 	}
 	pvr_wait_ready();
 	ready = timer_us_gettime64();
+	static uint32_t stats_frames;
+
+	if (stats && ++stats_frames % 30 == 0)
+	{
+		pvr_stats_t pvr;
+		float pt = 0, tr = 0;
+
+		stats->pt_quads = stats->tr_quads = 0;
+		for (int index = 0; index < frame->count; index++)
+		{
+			const s32_scene_quad *quad = &frame->quads[index];
+			const float area = (quad->x1 - quad->x0) * (quad->y1 - quad->y0);
+
+			if (!quad->image)
+				continue;
+			if (quad->weight >= 8)
+				stats->pt_quads++, pt += area < 0 ? -area : area;
+			else
+				stats->tr_quads++, tr += area < 0 ? -area : area;
+		}
+		stats->pt_pixels = (uint32_t)pt;
+		stats->tr_pixels = (uint32_t)tr + (frame->subtract ? 3u * 320 * 224 : 0);
+		stats->render_us = pvr_get_stats(&pvr) == 0 ? (uint32_t)(pvr.rnd_last_time / 1000) : 0;
+	}
+	/* the frame's palettes, now that the last frame's render (which read the old ones) is over */
+	for (int bank = 0; bank < frame->palette_count; bank++)
+		for (int pen = 0; pen < 16; pen++)
+			pvr_set_pal_entry((uint32_t)(bank * 16 + pen), frame->palettes[bank][pen]);
 	pvr_scene_begin();
 
 	/* the plain colours (the backdrop) in the opaque list, the textured quads punch-through */
@@ -357,9 +486,9 @@ void pvr_video_frame(pvr_video_stats *stats)
 
 		if (!quad->image || !pvr_images.base[quad->image] || quad->weight < 8)
 			continue;
-		if (quad->image != last_image || add != last_add)
+		if (quad->image != last_image || add != last_add || quad->palette != last_palette)
 		{
-			pvr_poly_cxt_txr(&context, PVR_LIST_PT_POLY, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
+			pvr_poly_cxt_txr(&context, PVR_LIST_PT_POLY, texture_format(quad),
 				pvr_images.width[quad->image], pvr_images.height[quad->image], pvr_images.base[quad->image],
 				PVR_FILTER_NONE);
 			context.depth.comparison = PVR_DEPTHCMP_GEQUAL;
@@ -369,6 +498,7 @@ void pvr_video_frame(pvr_video_stats *stats)
 			send_header(&header);
 			last_image = quad->image;
 			last_add = add;
+			last_palette = quad->palette;
 		}
 		quad_vertices(quad, (float)pvr_images.width[quad->image], (float)pvr_images.height[quad->image]);
 	}
@@ -377,15 +507,16 @@ void pvr_video_frame(pvr_video_stats *stats)
 	/* the quads that blend, then the fade */
 	pvr_list_begin(PVR_LIST_TR_POLY);
 	last_image = -1;
+	last_palette = -2;
 	for (int place = 0; place < ordered; place++)
 	{
 		const s32_scene_quad *quad = &frame->quads[order[place]];
 
 		if (!quad->image || !pvr_images.base[quad->image] || quad->weight >= 8)
 			continue;
-		if (quad->image != last_image)
+		if (quad->image != last_image || quad->palette != last_palette)
 		{
-			pvr_poly_cxt_txr(&context, PVR_LIST_TR_POLY, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
+			pvr_poly_cxt_txr(&context, PVR_LIST_TR_POLY, texture_format(quad),
 				pvr_images.width[quad->image], pvr_images.height[quad->image], pvr_images.base[quad->image],
 				PVR_FILTER_NONE);
 			context.depth.comparison = PVR_DEPTHCMP_GEQUAL;
@@ -395,6 +526,7 @@ void pvr_video_frame(pvr_video_stats *stats)
 			pvr_poly_compile(&header, &context);
 			send_header(&header);
 			last_image = quad->image;
+			last_palette = quad->palette;
 		}
 		quad_vertices(quad, (float)pvr_images.width[quad->image], (float)pvr_images.height[quad->image]);
 	}

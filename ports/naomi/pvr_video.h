@@ -22,6 +22,9 @@ typedef struct
 	uint32_t build_us;         /* the scene worked out (s32_scene_build) */
 	uint32_t wait_us;          /* waiting for the PowerVR2 to take a new scene */
 	uint32_t submit_us;        /* the quads handed to it */
+	uint32_t render_us;        /* the PowerVR2's render of the frame before */
+	int pt_quads, tr_quads;
+	uint32_t pt_pixels, tr_pixels;    /* their area on the 320 x 224 screen */
 } pvr_video_stats;
 
 /* The PowerVR2 on, the scene on it (video.c then draws no sprites of its own) */
