@@ -12,3 +12,5 @@ __pycache__/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 CLAUDE.md
+# errores de los encargos al equipo (agy)
+.agy-tasks/*.err
